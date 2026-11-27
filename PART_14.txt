@@ -1,0 +1,412 @@
+#+    issuances = [row for row in active if row["event_type"] == "issuance"]
+#+    warnings = [] if source is None else list(source.get("warnings", []))
+#+    linked, details, reconciliation = set(), [], []
+#+    manual_count, provisional = 0, False
+#+    for entry in issuances:
+#+        trade_id = entry.get("trade_id")
+#+        match = voice.get(trade_id)
+#+        candidates = [row["id"] for row in voice.values()
+#+                      if _signature(entry) is not None and _signature(row) == _signature(entry)]
+#+        other_manual = [row["id"] for row in issuances if row["id"] != entry["id"]
+#+                        and _signature(entry) is not None and _signature(row) == _signature(entry)]
+#+        counted = False
+#+        if match is not None and trade_id not in linked:
+#+            status, counted = "linked", True
+#+            linked.add(trade_id)
+#+            detail = {**entry, **{key: value for key, value in match.items() if value not in (None, "")}}
+#+        elif match is not None:
+#+            status, detail, provisional = "duplicate_link", dict(entry), True
+#+        elif trade_id and any(row["id"] == trade_id for row in trades):
+#+            status, detail, provisional = "wrong_flow", dict(entry), True
+#+        else:
+#+            counted = entry.get("confirmed_missing") is True
+#+            status = "confirmed_missing" if counted else "pending_link"
+#+            if trade_id:
+#+                status = "linked_trade_missing_confirmed" if counted else "linked_trade_missing"
+#+            detail = dict(entry)
+#+            manual_count += int(counted)
+#+            if not counted or candidates or other_manual:
+#+                provisional = True
+#+        if match is None and (candidates or other_manual):
+#+            warnings.append("A manual subscription issuance has a possible duplicate. Reconcile its exact SLD trade link before treating the voiceflow total as final.")
+#+        detail.update(manual_id=entry["id"], reconciliation_status=status, counted=counted)
+#+        details.append(detail)
+#+        reconciliation.append({"entry_id": entry["id"], "status": status, "trade_id": trade_id,
+#+                               "candidate_trade_ids": candidates if match is None else [],
+#+                               "candidate_manual_ids": other_manual, "counted": counted})
+#+    if any(item["status"] not in {"linked", "confirmed_missing", "linked_trade_missing_confirmed"} for item in reconciliation):
+#+        warnings.append("Subscription issuances awaiting reconciliation remain visible; only explicit links or confirmed missing-SLD entries contribute to the trade count.")
+#+    if source is None:
+#+        warnings.append("No saved SLD figures are available for this day. Shared manual entries remain available.")
+#+    complete = source is not None and source.get("coverage", {}).get("trades_complete", True)
+#+    if source is not None and not complete:
+#+        warnings.append("Source trade coverage is incomplete. Matched rows remain visible, while headline trade and CHF totals are unavailable.")
+#+    requests = {flow: None for flow in ("eflow", "voiceflow", "unknown")} if source is None else {flow: source["requests"].get(flow) for flow in ("eflow", "voiceflow", "unknown")}
+#+    volume, missing_volume = _sum(eflow, "chf")
+#+    pnl, missing_pnl = _sum(eflow, "pnl_chf")
+#+    missing_threshold = sum(row.get("chf") in (None, "") for row in eflow)
+#+    if missing_threshold:
+#+        warnings.append("Some eFlow CHF amounts are unavailable, so the large-trade list and CHF volume are incomplete.")
+#+    read_date = None
+#+    if source is not None:
+#+        stamp = datetime.fromisoformat(source["read_at"].replace("Z", "+00:00"))
+#+        if stamp.utcoffset() is not None:
+#+            try:
+#+                read_date = stamp.astimezone(ZoneInfo("Europe/Zurich")).date().isoformat()
+#+            except ZoneInfoNotFoundError:
+#+                warnings.append("Zurich timezone data is unavailable for classifying the source read date.")
+#+    reconstructed = read_date is not None and read_date > day
+#+    capture_label = {"live": "Live SLD figures", "saved": "Saved SLD figures", "missing": "No saved SLD figures"}[source_state]
+#+    if reconstructed:
+#+        capture_label += " · reconstructed from read on " + read_date
+#+    return {"day": day, "generated_at": _now(), "read_at": None if source is None else source["read_at"],
+#+            "source_state": source_state, "snapshot_saved_at": snapshot_saved_at,
+#+            "capture_label": capture_label, "reconstructed": reconstructed, "read_date_zurich": read_date,
+#+            "trade_coverage_complete": complete,
+#+            "coverage": {} if source is None else source.get("coverage", {}),
+#+            "unresolved_trades": [] if source is None else source.get("unresolved_trades", []),
+#+            "requests": requests,
+#+            "eflow": {"request_count": requests["eflow"], "trade_count": len(eflow) if complete else None,
+#+                      "volume_chf": volume if complete else None, "pnl_chf": pnl if complete else None,
+#+                      "missing_volume_count": missing_volume, "missing_pnl_count": missing_pnl},
+#+            "voiceflow": {"request_count": requests["voiceflow"], "trade_count": len(voice) + manual_count if complete else None,
+#+                          "source_trade_count": len(voice) if source is not None else None, "manual_trade_count": manual_count,
+#+                          "provisional": provisional or not complete},
+#+            "unknown_trade_count": len(unknown) if source is not None else None,
+#+            "unknown_trades": unknown,
+#+            "eflow_trades": [row for row in eflow if row.get("chf") not in (None, "") and Decimal(row["chf"]) > Decimal("500000")],
+#+            "eflow_unresolved_trades": [row for row in eflow if row.get("chf") in (None, "")],
+#+            "voiceflow_trades": [row for trade_id, row in voice.items() if trade_id not in linked],
+#+            "voice_options": [{"value": row["id"], "label": " · ".join(str(row.get(key) or "") for key in ("id", "product_type", "currency", "amount"))} for row in voice.values()],
+#+            "subscription_wins": [row for row in active if row["event_type"] == "win"],
+#+            "subscription_issuances": details, "pre_hedges": [row for row in active if row["event_type"] == "pre_hedge"],
+#+            "manual_entries": active, "warnings": list(dict.fromkeys(warnings)), "reconciliation": reconciliation}
+# FILE {"kind": "app", "name": "coupon_lab/ui/daily_reporting.py", "new_lf": true}
+#+"""Daily Reporting Dash page for a server-owned DailyService.
+#+
+#+Inputs: the service supplied by the launcher and explicit browser form values.
+#+Outputs: daily summaries, saved source status and shared manual-entry actions.
+#+The service owns source reads, arithmetic, validation and SQLite persistence.
+#+No connection settings or service object enter a browser Store. Dependencies:
+#+the app's existing Dash installation and Python's standard library.
+#+"""
+#+from __future__ import annotations
+#+
+#+from datetime import date, datetime
+#+from decimal import Decimal, InvalidOperation
+#+import hashlib
+#+import json
+#+import uuid
+#+from zoneinfo import ZoneInfo
+#+
+#+from dash import Input, Output, State, ctx, dcc, html, no_update
+#+from dash.exceptions import PreventUpdate
+#+
+#+from .components import dropdown, field, panel, plain_table
+#+from .formatting import swiss_timestamp
+#+from .navigation import report_path
+#+
+#+PAGE = 'daily-reporting'
+#+FORM_FIELDS = ('event', 'product-type', 'amount', 'currency', 'provider', 'underlyings', 'trade')
+#+ACTION_IDS = ('daily-add', 'daily-link', 'daily-confirm-missing', 'daily-remove', 'daily-capture', 'daily-new')
+#+
+#+
+#+class DailyUIError(Exception):
+#+    """An authored form instruction that is safe to display."""
+#+
+#+
+#+def _iso(value):
+#+    return value.isoformat() if isinstance(value, date) else str(value)
+#+
+#+
+#+def _initial_day(service):
+#+    if service is not None:
+#+        try:
+#+            return _iso(service.previous_day())
+#+        except Exception:
+#+            pass
+#+    return datetime.now(ZoneInfo('Europe/Zurich')).date().isoformat()
+#+
+#+
+#+def _day_options(service, selected):
+#+    values = {selected}
+#+    if service is not None:
+#+        values.update(_iso(day) for day in service.days())
+#+        values.add(_iso(service.today()))
+#+        values.add(_iso(service.previous_day()))
+#+    return [{'label': date.fromisoformat(day).strftime('%a %d.%m.%Y'), 'value': day}
+#+            for day in sorted(values, reverse=True)]
+#+
+#+
+#+def _input(identifier, placeholder='', **kwargs):
+#+    return dcc.Input(id=identifier, type='text', value='', placeholder=placeholder,
+#+                     className='daily-input', **kwargs)
+#+
+#+
+#+def layout(service):
+#+    selected = _initial_day(service)
+#+    return html.Div([
+#+        dcc.Store(id='daily-view'),
+#+        # One browser-session nonce plus action content gives retries the same
+#+        # token. New entry deliberately starts a new operation, even if equal.
+#+        dcc.Store(id='daily-operation', data=None, storage_type='session'),
+#+        dcc.Interval(id='daily-interval', interval=60_000, n_intervals=0, disabled=True),
+#+        html.Div([html.Div([html.Div('MORNING CALL', className='page-kicker'),
+#+                            html.H1('Daily Reporting')]),
+#+                  html.Div('Europe/Zurich · midnight to midnight', className='daily-muted')], className='daily-heading'),
+#+        *([html.Div('Synthetic demonstration · no office data', className='daily-demo-label')]
+#+          if getattr(service, 'demo', False) else []),
+#+        html.Div([
+#+            field('Report day', dcc.Dropdown(id='daily-day', options=[{'label': selected, 'value': selected}],
+#+                                             value=selected, clearable=False, searchable=True, className='shell-dropdown')),
+#+            html.Button('Previous business day', id='daily-previous', n_clicks=0, className='button quiet'),
+#+            html.Button('Today', id='daily-today', n_clicks=0, className='button quiet'),
+#+            html.Button('Refresh', id='daily-refresh', n_clicks=0, className='button'),
+#+            html.Button('Save day snapshot', id='daily-capture', n_clicks=0, className='button quiet',
+#+                        title='Save SLD figures once for this day. If already saved, reopen the existing snapshot.'),
+#+        ], className='daily-toolbar'),
+#+        html.Div(id='daily-message', role='status', className='daily-message'),
+#+        html.Div(id='daily-source', className='daily-source', role='status'),
+#+        html.Div(id='daily-content'),
+#+        panel('Shared manual entries', [
+#+            html.P('The selected report day applies to every action below. Entries are shared with colleagues. Refresh keeps your typed inputs.', className='daily-muted'),
+#+            html.Div([
+#+                field('Event', dropdown('daily-event', [
+#+                    {'label': 'Subscription won', 'value': 'win'},
+#+                    {'label': 'Subscription issued', 'value': 'issuance'},
+#+                    {'label': 'Pre-hedge', 'value': 'pre_hedge'}], 'win')),
+#+                field('Product type', _input('daily-product-type', 'e.g. BRC')),
+#+                field('Amount in original currency', _input('daily-amount', 'Optional for a win', inputMode='decimal')),
+#+                field('Currency', _input('daily-currency', 'CHF', maxLength=3)),
+#+                field('Executed hedge provider', _input('daily-provider', 'Unknown if not established')),
+#+                field('Underlyings', _input('daily-underlyings', 'Separate symbols with ;')),
+#+            ], className='daily-form-grid'),
+#+            field('SLD trade reference (optional for a new entry)',
+#+                  dcc.Dropdown(id='daily-trade', options=[], value=None, clearable=True,
+#+                               searchable=True, placeholder='No SLD link', className='shell-dropdown')),
+#+            html.Div([
+#+                html.Button('Add entry', id='daily-add', n_clicks=0, className='button'),
+#+                html.Button('Start another entry', id='daily-new', n_clicks=0, className='button quiet'),
+#+            ], className='daily-actions'),
+#+            html.H3('Link or remove an existing entry', className='daily-form-subtitle'),
+#+            field('Existing manual entry', dropdown('daily-entry', [], None)),
+#+            html.Div([
+#+                html.Button('Link to selected SLD trade', id='daily-link', n_clicks=0, className='button quiet'),
+#+                html.Button('Confirm missing from SLD', id='daily-confirm-missing', n_clicks=0, className='button quiet',
+#+                            title='Use after checking that this issuance is absent from SLD. It is then counted as a manual issuance.'),
+#+                html.Button('Remove entry', id='daily-remove', n_clicks=0, className='button quiet'),
+#+            ], className='daily-actions'),
+#+            html.P('An unmatched issuance remains pending until it is linked or confirmed absent from SLD. Conflicting revisions require Refresh and a new selection.', className='daily-muted'),
+#+        ], class_name='panel daily-editor'),
+#+    ], id='daily-page', className='daily-page', style={'display': 'none'})
+#+
+#+
+#+def _text(value):
+#+    if value is None or value == '':
+#+        return 'Unknown'
+#+    if isinstance(value, (tuple, list)):
+#+        return '; '.join(str(item) for item in value) or 'Unknown'
+#+    return str(value)
+#+
+#+
+#+def _number(value, currency=False):
+#+    if value is None:
+#+        return 'Unavailable'
+#+    try:
+#+        number = Decimal(str(value))
+#+        if not number.is_finite():
+#+            return 'Unavailable'
+#+        result = f'{number:,.2f}' if currency else f'{number:,}'
+#+        return ('CHF ' if currency else '') + result
+#+    except (ValueError, InvalidOperation):
+#+        return 'Unavailable'
+#+
+#+
+#+def _table(title, rows, empty):
+#+    columns = [('reference', 'Trade / entry'), ('product_type', 'Product type'), ('amount', 'Amount'), ('currency', 'Currency'),
+#+               ('underlyings', 'Underlyings'), ('provider', 'Hedge provider'), ('platform', 'Platform / source')]
+#+    data = []
+#+    for item in rows:
+#+        values = dict(item)
+#+        if item.get('amount') not in (None, ''):
+#+            values['amount'] = _number(item['amount'])
+#+            if item.get('currency') != 'CHF' and item.get('chf') is not None:
+#+                values['amount'] += ' (' + _number(item['chf'], currency=True) + ')'
+#+        values['reference'] = item.get('trade_id') or item.get('manual_id') or item.get('id')
+#+        values.setdefault('provider', item.get('hedge_provider'))
+#+        values.setdefault('platform', item.get('originator'))
+#+        if item.get('provider_provisional') and values.get('provider'):
+#+            values['provider'] = str(values['provider']) + ' (selected SLD hedge; provisional)'
+#+        line = [_text(values.get(key)) for key, _ in columns]
+#+        status = item.get('reconciliation_status')
+#+        if status:
+#+            line.append(_text(status) + (' · counted' if item.get('counted') else ' · pending'))
+#+        elif any('reconciliation_status' in row for row in rows):
+#+            line.append('SLD')
+#+        data.append(line)
+#+    headers = [label for _, label in columns]
+#+    if any('reconciliation_status' in row for row in rows):
+#+        headers.append('Reconciliation')
+#+    return panel(title, plain_table(headers, data) if data else html.P(empty, className='daily-muted'))
+#+
+#+
+#+def render(view, today):
+#+    """Render supplied business results without deriving counts from table rows."""
+#+    eflow, voice = view.get('eflow', {}), view.get('voiceflow', {})
+#+    cards = []
+#+    specs = [('eFlow requests', eflow.get('request_count'), False),
+#+             ('eFlow trades', eflow.get('trade_count'), False),
+#+             ('eFlow issued / traded volume', eflow.get('volume_chf'), True),
+#+             ('eFlow issuance PnL', eflow.get('pnl_chf'), True),
+# COPY BLOCK 19
+#+             ('Voiceflow requests', voice.get('request_count'), False),
+#+             ('Voiceflow trades' + (' · provisional' if voice.get('provisional') else ''), voice.get('trade_count'), False)]
+#+    for label, value, currency in specs:
+#+        cards.append(html.Article([html.Div(label, className='kpi-label'),
+#+                                   html.Div(_number(value, currency), className='kpi-value')], className='kpi-card'))
+#+    is_today = view.get('day') == _iso(today)
+#+    notes = list(view.get('warnings') or [])
+#+    if any(item.get('provider_provisional') for key in ('eflow_trades', 'voiceflow_trades', 'subscription_issuances')
+#+           for item in view.get(key, [])):
+#+        notes.append('Provisional provider labels come from the selected SLD hedge and are not independently confirmed execution evidence.')
+#+    if view.get('requests', {}).get('unknown'):
+#+        notes.append('Requests with unresolved flow: ' + _number(view['requests']['unknown']))
+#+    if view.get('unknown_trade_count'):
+#+        notes.append('Trades with unresolved flow: ' + _number(view['unknown_trade_count']))
+#+    if eflow.get('missing_volume_count'):
+#+        notes.append('eFlow volume has missing CHF amounts: ' + _number(eflow['missing_volume_count']))
+#+    if eflow.get('missing_pnl_count'):
+#+        notes.append('eFlow PnL has missing inputs: ' + _number(eflow['missing_pnl_count']))
+#+    unavailable = view.get('source_state') == 'missing'
+#+    empty = 'Source unavailable for this day.' if unavailable else 'No matching products in this report.'
+#+    return html.Div([
+#+        html.Div([html.Strong('In progress' if is_today else 'Report day ' + str(view.get('day'))),
+#+                  html.Span(' · Subscription issuances are included once in the voiceflow trade count.')], className='daily-context'),
+#+        html.Div(cards, className='daily-kpis'),
+#+        *([html.Ul([html.Li(str(note)) for note in notes], className='daily-warnings')] if notes else []),
+#+        _table('eFlow trades above CHF 500,000 equivalent', view.get('eflow_trades', []), empty),
+#+        *([_table('eFlow trades with unresolved CHF threshold', view['eflow_unresolved_trades'], '')]
+#+          if view.get('eflow_unresolved_trades') else []),
+#+        _table('Voiceflow ordinary trades', view.get('voiceflow_trades', []), empty),
+#+        *([_table('Trades with unresolved flow · review required', view['unknown_trades'], '')]
+#+          if view.get('unknown_trades') else []),
+#+        *([panel('Source trade rows requiring review', plain_table(
+#+            ['SLD product', 'RFQ', 'Review reason'],
+#+            [[_text(row.get('product_id')), _text(row.get('id')), _text(row.get('reason'))]
+#+             for row in view['unresolved_trades']]))]
+#+          if view.get('unresolved_trades') else []),
+#+        _table('Subscription products won', view.get('subscription_wins', []), 'No manual subscription wins recorded.'),
+#+        _table('Subscription products issued', view.get('subscription_issuances', []), empty),
+#+        _table('Pre-hedges · excluded from main volume and PnL', view.get('pre_hedges', []), 'No manual pre-hedges recorded.'),
+#+    ])
+#+
+#+
+#+def source_status(view):
+#+    state = view.get('source_state', 'missing')
+#+    labels = {'live': 'Live SLD', 'saved': 'Saved SLD figures', 'missing': 'SLD figures unavailable'}
+#+    parts = [labels.get(state, state), 'Last successful source read: ' + swiss_timestamp(view.get('read_at'))]
+#+    if view.get('snapshot_saved_at'):
+#+        parts.append('Saved: ' + swiss_timestamp(view['snapshot_saved_at']))
+#+    if view.get('capture_label'):
+#+        parts.append(str(view['capture_label']))
+#+    if view.get('refresh_error'):
+#+        parts.append('Refresh failed; last successful SLD figures retained.' if view.get('read_at') else 'Refresh failed; no successful SLD read is available.')
+#+    return ' · '.join(parts)
+#+
+#+
+#+def _safe_error(error):
+#+    # Only authored domain errors are printable. Driver and unexpected exception
+#+    # payloads may contain private queries/connection information.
+#+    from coupon_lab.errors import PipelineError
+#+    allowed = (DailyUIError, PipelineError)
+#+    try:
+#+        from coupon_lab.daily import DailyError
+#+        allowed += (DailyError,)
+#+    except ImportError:
+#+        pass
+#+    try:
+#+        from coupon_lab.daily_store import DailyStoreError
+#+        allowed += (DailyStoreError,)
+#+    except ImportError:
+#+        pass
+#+    return str(error) if isinstance(error, allowed) else 'Daily Reporting could not complete this action. Refresh and consult the internal run log; your typed inputs are retained.'
+#+
+#+
+#+def _entry(view, selected):
+#+    try:
+#+        identifier, revision = json.loads(selected)
+#+        if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+#+            raise ValueError
+#+    except (TypeError, ValueError):
+#+        raise DailyUIError('Select a current manual entry before linking or removing it.') from None
+#+    entries = view.get('manual_entries') or []
+#+    result = next((item for item in entries if str(item.get('id')) == str(identifier) and not item.get('removed')), None)
+#+    if result is None:
+#+        raise DailyUIError('Select a current manual entry. Refresh if a colleague changed it.')
+#+    # Polling refreshes the list, but never upgrades the revision the operator
+#+    # selected. The store must reject an action on an older selected revision.
+#+    return {**result, 'revision': revision}
+#+
+#+
+#+def _entry_options(view):
+#+    result = []
+#+    for entry in view.get('manual_entries') or []:
+#+        if entry.get('removed'):
+#+            continue
+#+        label = ' · '.join(_text(entry.get(key)) for key in ('id', 'event_type', 'product_type', 'amount', 'currency'))
+#+        result.append({'label': label, 'value': json.dumps([entry['id'], entry.get('revision', entry.get('rev'))], separators=(',', ':'))})
+#+    return result
+#+
+#+
+#+def _token(nonce, action, day, payload):
+#+    return hashlib.sha256(json.dumps([nonce, action, day, payload], sort_keys=True, default=str).encode()).hexdigest()
+#+
+#+
+#+def register_callbacks(app, service):
+#+    outputs = [Output('daily-view', 'data'), Output('daily-content', 'children'), Output('daily-source', 'children'),
+#+               Output('daily-message', 'children'), Output('daily-day', 'options'),
+#+               Output('daily-entry', 'options'), Output('daily-trade', 'options'), Output('daily-operation', 'data')]
+#+    inputs = [Input('location', 'pathname'), Input('daily-day', 'value'), Input('daily-interval', 'n_intervals'),
+#+              Input('daily-refresh', 'n_clicks'), *[Input(identifier, 'n_clicks') for identifier in ACTION_IDS]]
+#+    states = [State('daily-view', 'data'), State('daily-operation', 'data'), State('daily-entry', 'value'),
+#+              *[State('daily-' + name, 'value') for name in FORM_FIELDS]]
+#+
+#+    @app.callback(outputs, inputs, states,
+#+                  running=[(Output(identifier, 'disabled'), True, False) for identifier in ACTION_IDS])
+#+    def update(*args):
+#+        path, day = args[:2]
+#+        if report_path(app, path) != '/daily-reporting':
+#+            raise PreventUpdate
+#+        if service is None:
+#+            return [None, html.P('Daily Reporting is not configured. Select the approved Daily Reporting settings in the launcher.'), '',
+#+                    'No source was read.', no_update, [], [], no_update]
+#+        state = args[len(inputs):]
+#+        previous, nonce, selected_entry, event, product_type, amount, currency, provider, underlyings, trade_id = state
+#+        nonce = nonce or uuid.uuid4().hex
+#+        action = ctx.triggered_id
+#+        message = ''
+#+        try:
+#+            date.fromisoformat(day)
+#+            if action in {'daily-add', 'daily-link', 'daily-confirm-missing', 'daily-remove'}:
+#+                if not previous or previous.get('day') != day:
+#+                    raise DailyUIError('Wait for the selected report day to load before saving an entry.')
+#+                values = {'event_type': event, 'product_type': product_type or '', 'amount': amount or None,
+#+                          'currency': (currency or '').upper(), 'provider': provider or '',
+#+                          'underlyings': underlyings or '', 'trade_id': trade_id or None, 'confirmed_missing': False}
+#+                if action == 'daily-add':
+#+                    service.add(day, values, _token(nonce, action, day, values))
+#+                    message = 'Entry saved. Choose Start another entry for the next product.'
+#+                else:
+#+                    entry = _entry(previous, selected_entry)
+#+                    revision = entry.get('revision', entry.get('rev'))
+#+                    payload = {'id': entry['id'], 'revision': revision, 'trade_id': trade_id,
+#+                               'confirmed_missing': action == 'daily-confirm-missing'}
+#+                    token = _token(nonce, action, day, payload)
+#+                    if action == 'daily-remove':
+#+                        service.remove(day, entry['id'], revision, token)
+#+                        message = 'Entry removed.'
+#+                    else:
+#+                        confirmed_missing = action == 'daily-confirm-missing'
+#+                        if not trade_id and not confirmed_missing:
+#+                            raise DailyUIError('Select the matching SLD trade reference before linking.')
+#+                        service.link(day, entry['id'], revision, None if confirmed_missing else trade_id, token,

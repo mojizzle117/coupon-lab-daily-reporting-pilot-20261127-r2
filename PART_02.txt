@@ -1,0 +1,386 @@
+#=    if destination.exists():
+#=        raise ValueError("Transfer destination already exists. Choose a new versioned folder; nothing was overwritten.")
+#=    return destination
+#=
+#=
+#=INSTALLER = '''def main():
+#=    parser = argparse.ArgumentParser(description="Extract the complete Coupon Lab office release")
+#=    parser.add_argument("--destination", default=VERSION)
+#=    args = parser.parse_args()
+#=    target = Path(args.destination).absolute()
+#=    if target.exists() or target.is_symlink():
+#=        parser.exit(1, "Destination already exists. Choose a new versioned folder; nothing was overwritten.\\n")
+#=    target = target.resolve()
+#=    target.parent.mkdir(parents=True, exist_ok=True)
+#=    staging = Path(tempfile.mkdtemp(prefix="coupon-lab-install-", dir=str(target.parent)))
+#=    try:
+#=        if set(FILES) & set(PNG_ASSETS) or set(SHA256) != set(FILES) | set(PNG_ASSETS) or set(RUNTIME_PATHS) != set(SHA256) or len(set(RUNTIME_PATHS.values())) != len(RUNTIME_PATHS):
+#=            raise ValueError("Installer payload inventory differs")
+#=        for delivery_name in sorted(FILES.keys() | PNG_ASSETS.keys()):
+#=            name = delivery_name
+#=            delivered = PurePosixPath(name)
+#=            if delivered.is_absolute() or ".." in delivered.parts or chr(92) in name or ":" in name or str(delivered) != name:
+#=                raise ValueError("Invalid delivery path")
+#=            name = RUNTIME_PATHS[name]
+#=            relative = PurePosixPath(name)
+#=            if relative.is_absolute() or ".." in relative.parts or "\\\\" in name or ":" in name or str(relative) != name:
+#=                raise ValueError("Invalid installer payload path")
+#=            if delivery_name in PNG_ASSETS and relative.suffix != ".png":
+#=                raise ValueError("Encoded asset is not PNG artwork")
+#=            data = FILES[delivery_name].encode("utf-8") if delivery_name in FILES else base64.b64decode(PNG_ASSETS[delivery_name], validate=True)
+#=            if hashlib.sha256(data).hexdigest() != SHA256[delivery_name]:
+#=                raise ValueError("Installer payload integrity failed")
+#=            output = staging.joinpath(*relative.parts)
+#=            output.parent.mkdir(parents=True, exist_ok=True)
+#=            output.write_bytes(data)
+#=        (staging / "inputs" / "platform_a").mkdir(parents=True)
+#=        (staging / "inputs" / "platform_b").mkdir(parents=True)
+#=        (staging / "outputs").mkdir()
+#=        if target.exists() or target.is_symlink():
+#=            raise ValueError("Installation destination was created during extraction")
+#=        staging.rename(target)
+#=    except Exception:
+#=        shutil.rmtree(staging, ignore_errors=True)
+#=        parser.exit(1, "Installation failed. Check permissions or obtain a fresh installer. No office data was read.\\n")
+#=    print("Installed " + VERSION + " in " + str(target))
+#=    if "changed_OPERATOR_README.md" in RUNTIME_PATHS.values():
+#=        print("Start with changed_OPERATOR_README.md for the handover and launch instructions.")
+#=    elif "docs/35_DOMINO_INSTALL_AND_RUN.txt" in RUNTIME_PATHS.values():
+#=        print("For Windows and Domino installation, open docs/35_DOMINO_INSTALL_AND_RUN.txt.")
+#=    print("Read 00_START_WITH_GPT.txt and docs/01_RUN_AND_CONNECT.txt.")
+#=    print("Then run: python run_coupon_lab.py selftest")
+#=    print("Configure settings.json and office_connection.py internally before check/start.")
+#=    return 0
+#=
+#=if __name__ == "__main__":
+#=    raise SystemExit(main())
+#='''
+#=
+#=
+#=def build(destination, root=ROOT, baseline_manifest=None):
+#=    root = Path(root)
+#=    destination = _destination(root, destination)
+#=    files = payload_files(root)
+#=    names = {path.relative_to(root).as_posix() for path in files}
+#=    if not {"office_connection.py", "settings.json", "run_coupon_lab.py", "coupon_lab/__init__.py", "brand_repository.json"} <= names:
+#=        raise ValueError("Clean release source is incomplete; restore its entry point, package, settings and connection placeholder.")
+#=    version = source_version(root)
+#=    if "-domino." in version or names & {"domino_app.sh", "domino.env.example", "coupon_lab/domino_app.py"}:
+#=        if not DOMINO_REQUIRED_FILES <= names:
+#=            raise ValueError("Clean Domino release source is incomplete; restore the Domino launcher, deployment template, guide and smoke tool.")
+#=    text_files, asset_files, hashes = {}, {}, {}
+#=    for path in files:
+# COPY BLOCK 2
+#=        name = path.relative_to(root).as_posix()
+#=        data = path.read_bytes()
+#=        if name == "office_connection.py" and not is_unconfigured_connection(data):
+#=            raise ValueError("Connection hook contains configured executable code; package only the clean placeholder, never office connection code.")
+#=        if name == "settings.json":
+#=            _validate_settings(data, names)
+#=        if name == "brand_repository.json":
+#=            _validate_brand_repository(data)
+#=        hashes[name] = hashlib.sha256(data).hexdigest()
+#=        if path.suffix.lower() == ".png":
+#=            asset_files[name] = base64.b64encode(data).decode("ascii")
+#=        else:
+#=            text_files[name] = data.decode("utf-8")
+#=    baseline = None
+#=    if baseline_manifest is not None:
+#=        baseline = json.loads(Path(baseline_manifest).read_text(encoding="utf-8"))
+#=        if not isinstance(baseline.get("files"), dict):
+#=            raise ValueError("Baseline manifest must contain source hashes")
+#=    def delivery_name(name):
+#=        if baseline is not None and baseline["files"].get(name) != hashes.get(name):
+#=            relative = PurePosixPath(name)
+#=            return str(relative.with_name("changed_" + relative.name))
+#=        return name
+#=    runtime_paths = {delivery_name(name): name for name in hashes}
+#=    if len(runtime_paths) != len(hashes):
+#=        raise ValueError("Changed-file delivery names collide; restore unambiguous source filenames")
+#=    manifest = {"release": version, "files": dict(hashes), "coverage": "synthetic software checks only; office reconciliation separate",
+#=                "update_policy": "fresh versioned folder only; never overwrite office settings or connection adapter"}
+#=    if baseline is not None:
+#=        manifest.update(baseline_release=baseline.get("release", baseline.get("baseline")),
+#=                        delivery_names=dict(runtime_paths),
+#=                        changed_files=sorted(name for name in hashes if baseline["files"].get(name) != hashes[name]))
+#=    manifest_name = "changed_RELEASE_MANIFEST.json" if baseline is not None else "RELEASE_MANIFEST.json"
+#=    runtime_paths[manifest_name] = "RELEASE_MANIFEST.json"
+#=    manifest_text = json.dumps(manifest, indent=2) + "\n"
+#=    text_files["RELEASE_MANIFEST.json"] = manifest_text
+#=    hashes["RELEASE_MANIFEST.json"] = hashlib.sha256(manifest_text.encode()).hexdigest()
+#=    text_files = {delivery_name(name): content for name, content in text_files.items()}
+#=    asset_files = {delivery_name(name): content for name, content in asset_files.items()}
+#=    # The generated manifest is always marked in a changed-file delivery.
+#=    if baseline is not None:
+#=        text_files[manifest_name] = text_files.pop("changed_RELEASE_MANIFEST.json", text_files.pop("RELEASE_MANIFEST.json", manifest_text))
+#=    hashes = {delivery_name(name): value for name, value in hashes.items()}
+#=    installer_name = "changed_dashboard_draft.txt" if baseline is not None else "dashboard_draft.txt"
+#=    checksum_name = "changed_SHA256.txt" if baseline is not None else "SHA256.txt"
+#=    installer = (
+#=        "# Coupon Lab office installer. Rename " + installer_name + " to " + installer_name.removesuffix(".txt") + ".py.\n"
+#=        "# Run: python " + installer_name.removesuffix(".txt") + ".py --destination " + version + "\n"
+#=        "# Readable source only; PNG artwork uses labelled base64. No automatic\n"
+#=        "# installation, connection, AI call, eval, exec or external transmission.\n"
+#=        "from pathlib import Path, PurePosixPath\nimport argparse\nimport base64\nimport hashlib\nimport shutil\nimport tempfile\n\n"
+#=        "VERSION = " + repr(version) + "\n\n"
+#=        "FILES = " + pprint.pformat(text_files, width=120, sort_dicts=True) + "\n\n"
+#=        "PNG_ASSETS = " + pprint.pformat(asset_files, width=120, sort_dicts=True) + "\n\n"
+#=        "SHA256 = " + pprint.pformat(hashes, width=120, sort_dicts=True) + "\n\n" +
+#=        "RUNTIME_PATHS = " + pprint.pformat(runtime_paths, width=120, sort_dicts=True) + "\n\n" + INSTALLER
+#=    )
+#=    # Validate/read everything before creating even a temporary output folder.
+#=    destination.parent.mkdir(parents=True, exist_ok=True)
+#=    staging = Path(tempfile.mkdtemp(prefix="coupon-lab-transfer-", dir=destination.parent))
+#=    try:
+#=        installer_bytes = installer.encode("utf-8")
+#=        manifest_bytes = manifest_text.encode("utf-8")
+#=        (staging / installer_name).write_bytes(installer_bytes)
+#=        (staging / manifest_name).write_bytes(manifest_bytes)
+#=        checksum = hashlib.sha256(installer_bytes).hexdigest() + "  " + installer_name + "\n"
+#=        checksum += hashlib.sha256(manifest_bytes).hexdigest() + "  " + manifest_name + "\n"
+#=        (staging / checksum_name).write_bytes(checksum.encode("utf-8"))
+#=        _destination(root, destination)
+#=        staging.rename(destination)
+#=    except Exception:
+#=        shutil.rmtree(staging, ignore_errors=True)
+#=        raise
+#=    return destination / installer_name
+#=
+#=
+#=if __name__ == "__main__":
+#=    parser = argparse.ArgumentParser(description="Build a clean source-only office transfer")
+#=    parser.add_argument("--destination", type=Path, required=True, help="New versioned folder outside the application source")
+#=    parser.add_argument("--baseline-manifest", type=Path, help="Preserved source manifest; mark modified delivery filenames with changed_")
+#=    args = parser.parse_args()
+#=    try:
+#=        print(build(args.destination, baseline_manifest=args.baseline_manifest))
+#=    except (OSError, ValueError, SyntaxError):
+#=        parser.exit(1, "Build refused or failed. Use clean source, an unconfigured hook/settings and a fresh destination outside source. No prior transfer was overwritten.\n")
+# FILE {"kind": "app", "name": "Start_Coupon_Lab.bat", "new_lf": true, "old_lf": true}
+#=@echo off
+#=setlocal DisableDelayedExpansion
+#-cd /d "%~dp0"
+#+pushd "%~dp0"
+#=if errorlevel 1 exit /b 1
+#=rem PowerShell reads JSON without requiring a bootstrap Python. Only a resolved
+#=rem executable path is captured here; no settings or connection details print.
+#-rem Priority: COUPON_LAB_PYTHON, settings.json runtime.python, PATH python.
+#+rem Priority: COUPON_LAB_PYTHON, settings.json runtime.python, active conda, local Miniconda, PATH python.
+#=set "COUPON_LAB_EXECUTABLE="
+#-for /f "usebackq delims=" %%P in (`powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; try { $candidate=$env:COUPON_LAB_PYTHON; if ([string]::IsNullOrWhiteSpace($candidate)) { $cfg=ConvertFrom-Json -InputObject (Get-Content -LiteralPath 'settings.json' -Raw -Encoding UTF8); $candidate=$cfg.runtime.python }; if ($null -eq $candidate -or [string]::IsNullOrWhiteSpace($candidate)) { $candidate='python' }; if ($candidate -isnot [string] -or $candidate.IndexOf([char]34) -ge 0 -or $candidate.IndexOf([char]10) -ge 0 -or $candidate.IndexOf([char]13) -ge 0) { exit 2 }; if (Test-Path -LiteralPath $candidate -PathType Leaf) { $selected=(Get-Item -LiteralPath $candidate).FullName } else { if ($candidate.Contains('\') -or $candidate.Contains('/') -or $candidate.Contains(':') -or $candidate.Contains('*') -or $candidate.Contains('?')) { exit 2 }; $matches=@(Get-Command -Name $candidate -CommandType Application -ErrorAction Stop); $selected=$matches[0].Source }; [Console]::Out.WriteLine($selected); exit 0 } catch { exit 2 }"`) do set "COUPON_LAB_EXECUTABLE=%%P"
+#+for /f "usebackq delims=" %%P in (`powershell.exe -NoLogo -NoProfile -NonInteractive -Command "$ErrorActionPreference='Stop'; try { $candidate=$env:COUPON_LAB_PYTHON; if ([string]::IsNullOrWhiteSpace($candidate)) { $cfg=ConvertFrom-Json -InputObject (Get-Content -LiteralPath 'settings.json' -Raw -Encoding UTF8); $candidate=$cfg.runtime.python }; if ($null -eq $candidate -or [string]::IsNullOrWhiteSpace($candidate)) { $candidate='python'; if ($env:CONDA_PREFIX -and (Test-Path -LiteralPath (Join-Path $env:CONDA_PREFIX 'python.exe') -PathType Leaf)) { $candidate=Join-Path $env:CONDA_PREFIX 'python.exe' } else { foreach ($base in @($env:USERPROFILE,$env:LOCALAPPDATA,$env:ProgramData)) { if ($base) { $local=Join-Path $base 'miniconda3\python.exe'; if (Test-Path -LiteralPath $local -PathType Leaf) { $candidate=$local; break } } } } }; if ($candidate -isnot [string] -or $candidate.IndexOf([char]34) -ge 0 -or $candidate.IndexOf([char]10) -ge 0 -or $candidate.IndexOf([char]13) -ge 0) { exit 2 }; if (Test-Path -LiteralPath $candidate -PathType Leaf) { $selected=(Get-Item -LiteralPath $candidate).FullName } else { if ($candidate.Contains('\') -or $candidate.Contains('/') -or $candidate.Contains(':') -or $candidate.Contains('*') -or $candidate.Contains('?')) { exit 2 }; $matches=@(Get-Command -Name $candidate -CommandType Application -ErrorAction Stop); $selected=$matches[0].Source }; [Console]::Out.WriteLine($selected); exit 0 } catch { exit 2 }"`) do set "COUPON_LAB_EXECUTABLE=%%P"
+#=if not defined COUPON_LAB_EXECUTABLE (
+#=  echo Stage: launcher. Cannot read settings or resolve the approved Python executable.
+#=  echo Check runtime.python, COUPON_LAB_PYTHON and PowerShell availability. No settings values were printed.
+#=  pause
+#=  exit /b 1
+#=)
+#-"%COUPON_LAB_EXECUTABLE%" run_coupon_lab.py start %*
+#+"%COUPON_LAB_EXECUTABLE%" run_coupon_lab.py start --latest %*
+#=set "COUPON_LAB_EXIT=%errorlevel%"
+#=if not "%COUPON_LAB_EXIT%"=="0" (
+#=  echo.
+#=  echo Coupon Lab did not start. Read the stage and suggested action above.
+#=  pause
+#=)
+#+popd
+#=exit /b %COUPON_LAB_EXIT%
+# FILE {"kind": "app", "name": "run_coupon_lab.py", "new_lf": true, "old_lf": true}
+#="""Run Coupon Lab checks, data preparation, dashboard and diagnostics.
+#=
+#=Start here: python run_coupon_lab.py check, then start. Inputs are settings.json,
+#=original feedback and the approved office connection adapter. Outputs stay in
+#=versioned internal run folders. demo is explicitly synthetic, never a fallback.
+#=Nothing is installed or sent to an external service by this launcher.
+#="""
+#=from __future__ import annotations
+#=
+#=import argparse
+#=import errno
+#=import importlib.metadata
+#=import json
+#=from pathlib import Path
+#=import socket
+#=import sys
+#=import threading
+#=import traceback
+#=import webbrowser
+#=
+#=ROOT = Path(__file__).resolve().parent
+#=sys.path.insert(0, str(ROOT))
+#=from coupon_lab import VERSION
+#=from coupon_lab.storage import RunError, code_signature, digest, fingerprints, load_json, reopen_run, save_run, dumps
+#=
+#=
+#=def runtime_check():
+#=    if sys.version_info < (3, 12):
+#=        raise RunError("Stage: runtime. Use the approved Python 3.12+ environment that contains your Oracle client and Dash.")
+#=    versions = {"python": ".".join(map(str, sys.version_info[:3]))}
+#=    for package in ("dash", "plotly", "openpyxl"):
+#=        try:
+#=            versions[package] = importlib.metadata.version(package)
+#=        except importlib.metadata.PackageNotFoundError:
+#=            raise RunError("Stage: runtime. A required package is missing: " + package + ". Use your approved package route and the requirements guide. Nothing was installed.") from None
+#=    if int(versions["dash"].split(".")[0]) not in (3, 4) or int(versions["plotly"].split(".")[0]) < 5:
+#=        raise RunError("Stage: runtime. Supported UI versions are Dash 3/4 and Plotly 5+. Check requirements.txt in the approved environment.")
+#=    spreadsheet_version = tuple(int(part) for part in versions["openpyxl"].split(".")[:2])
+#=    if not (3, 1) <= spreadsheet_version < (4, 0):
+#=        raise RunError("Stage: runtime. Supported Excel reader is openpyxl 3.1 to below 4. Check requirements.txt through the approved package route; nothing was installed.")
+#=    try:
+#=        from zoneinfo import ZoneInfo
+#=        ZoneInfo("Europe/Zurich")
+#=    except Exception:
+#=        raise RunError("Stage: runtime. Europe/Zurich timezone data is unavailable. Add tzdata through the approved package route, especially on Windows; nothing was downloaded.") from None
+#=    return versions
+#=
+#=
+#=def settings_for_ui(cfg, snapshot):
+#=    from coupon_lab.ui.product_labels import product_label
+#=    from coupon_lab.brands import registry_for
+#=    rows = snapshot["rows"]
+#=    months = list(snapshot["months"])
+#=    if not months:
+#=        raise RunError("Stage: prepare. No reporting months were produced. Check feedback discovery and date mappings.")
+#=    choices = {}
+#=    for alias, field in (("product", "product_type"), ("currency", "currency"), ("callability", "callability"),
+#=                         ("barrier", "barrier"), ("capped", "capped"), ("region", "region"), ("basket", "underlying_structure")):
+#=        choices[alias] = sorted({product_label(row) if alias == "product" else str(row.get(field) or "Unknown") for row in rows})
+#=    requested_default = cfg.get("default_month")
+#=    return {"months": months, "default_month": requested_default if requested_default in months else months[-1],
+#=            "default_platform": cfg.get("default_platform", "PLATFORM_A"),
+#=            "default_population": cfg.get("default_population", "restricted"),
+#=            "ticket_size_bands": cfg.get("ticket_size_bands", [100000, 500000, 1000000]),
+#=            "filter_choices": choices, "mode": snapshot.get("mode", "office"),
+#=            "port": cfg.get("app", {}).get("port", 8054),
+#=            "brands": registry_for(cfg).data}
+#=
+#=
+#=def configured_files(cfg):
+#=    """Capture file identities before loading, so mid-run edits cannot look fresh."""
+#=    base = Path(cfg["_root"])
+#=    paths = [Path(cfg["_settings_path"])]
+#=    if cfg.get("_brand_repository_path") is not None:
+#=        paths.append(Path(cfg["_brand_repository_path"]))
+#=    for value in cfg.get("references", {}).values():
+#=        if isinstance(value, str):
+#=            paths.append(base / value)
+#=    hook = cfg.get("sld", {}).get("connection_module", "office_connection.py")
+#=    paths.append(base / hook)
+#=    feedback = cfg.get("feedback", {})
+#=    for role, spec in feedback.items():
+#=        if not spec.get("enabled", True):
+#=            continue
+#=        folder = base / spec.get("folder", "inputs/" + role)
+#=        for pattern in spec.get("patterns", [spec.get("pattern", "*.xlsx")]):
+#=            paths.extend(path for path in folder.glob(pattern) if path.is_file() and not path.name.startswith("~$"))
+#=    return [p.resolve() for p in paths if p.is_file()]
+#=
+#=
+#=def open_completed_run(cfg, run):
+#=    """Validate the saved run and the currently selected settings without opening a source."""
+#=    snapshot, manifest = reopen_run(run, ROOT)
+#=    inputs = manifest["inputs"]
+#=    if inputs.get(str(cfg["_settings_path"])) != cfg["_settings_hash"]:
+#=        raise RunError("Stage: freshness. The selected settings are not part of this run. Use the matching settings and completed run.")
+#=    if cfg.get("_brand_repository_path") is not None:
+#=        if inputs.get(str(cfg["_brand_repository_path"])) != cfg["_brand_repository_hash"]:
+#=            raise RunError("Stage: freshness. The brand assignment does not match this run. Use the matching assignment or prepare again.")
+#=    if set(map(str, configured_files(cfg))) - inputs.keys():
+#=        raise RunError("Stage: freshness. Newly selected input files are not part of this run. Prepare again before reopening; no database refresh was attempted.")
+#=    return snapshot, manifest
+#=
+#=
+#+def latest_completed_run(cfg):
+#+    """Resolve the publisher's pointer inside the configured output folder."""
+#+    output = (Path(cfg["_root"]) / cfg.get("output_folder", "outputs")).resolve()
+#+    try:
+#+        pointer = json.loads((output / "latest.json").read_text(encoding="utf-8-sig"))
+#+        name = pointer["run"]
+#+        if (not isinstance(name, str) or not name or name.startswith(".")
+#+                or any(char in name for char in "/\\:") or Path(name).name != name):
+#+            raise ValueError
+#+        run = (output / name).resolve()
+#+        if run.parent != output or not (run / "manifest.json").is_file():
+#+            raise ValueError
+#+        return run
+#+    except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+#+        raise RunError(f"Stage: launcher. Cannot resolve latest.json in {output}. "
+#+                       "Check the configured output folder and publish or restore a completed run.") from None
+#+
+#+
+#=def prepare(cfg, *, synthetic_connection_factory=None):
+#=    signature = code_signature(ROOT)
+#=    from coupon_lab.sources import load_sources
+#=    from coupon_lab.normalize import prepare_snapshot
+#=    configured_before = fingerprints(configured_files(cfg))
+#=    initial = dict(configured_before)
+#=    if synthetic_connection_factory is None:
+#=        print("[2/6] Reading original feedback and a consistent read-only SLD snapshot", flush=True)
+#=        bundle = load_sources(cfg)
+#=    else:
+#=        print("[2/6] Reading fictional feedback and in-memory source records", flush=True)
+#=        bundle = load_sources(cfg, connection_factory=synthetic_connection_factory)
+#=    current = fingerprints(configured_files(cfg))
+#=    if current != configured_before:
+#=        raise RunError("Stage: freshness. Feedback discovery, settings or references changed during loading. Keep inputs stable and prepare again.")
+#=    extra = bundle.get("input_hashes", {})
+#=    for path, expected in extra.items():
+#=        path = str(Path(path).resolve())
+#=        if path in initial and initial[path] != expected:
+#=            raise RunError("Stage: freshness. An input changed while loading. Prepare again.")
+#=        initial[path] = expected
+#=    # Inputs supplied by an adapter must be recorded; the snapshot never caches
+#=    # a database response as if a later filter interaction queried SLD again.
+#=    for path in bundle.get("input_files", []):
+#=        resolved = str(Path(path).resolve())
+#=        if resolved not in initial:
+#=            initial[resolved] = digest(resolved)
+#=    print("[3/6] Normalizing, linking and checking evidence without multiplying RFQs", flush=True)
+#=    snapshot = prepare_snapshot(bundle, cfg)
+#=    if synthetic_connection_factory is not None:
+#=        snapshot["synthetic_smoke"] = True
+#=    print("[4/6] Checking exact metrics and saving a complete run", flush=True)
+#=
+#=    def final_input_check():
+#=        # Re-discover reports after normalization and metric checks. Hashing
+#=        # only files already read cannot notice a new report arriving late.
+#=        if fingerprints(configured_files(cfg)) != configured_before:
+#=            raise RunError("Stage: freshness. Feedback discovery, settings or references changed during preparation. Keep inputs stable and prepare again; the previous successful run is preserved.")
+#=
+#=    run = save_run(snapshot, cfg, initial, ROOT, expected_code=signature,
+#=                   final_input_check=final_input_check)
+#=    return snapshot, run
+#=
+#=
+#=def diagnose(cfg, step):
+#=    """Stop at a real processing boundary; never print rows or driver errors."""
+#=    from coupon_lab.sources import load_feedback, load_references, load_sources
+#=    from coupon_lab.normalize import prepare_feedback, prepare_snapshot, validate_references
+#=    if step == "feedback":
+#=        bundle = load_feedback(cfg)
+#=        rows, quality, periods = prepare_feedback(bundle, cfg)
+#=        summary = {"stage": step, "rfq_count": len(rows), "platform_month_counts": {p: len(v) for p, v in periods.items()},
+#=                   "note": "Feedback-only diagnosis; no SLD connection. CHF requires the separate reference stage."}
+#=    elif step == "references":
+#=        bundle = {"references": load_references(cfg)}
+#=        validate_references(bundle, cfg)
+#=        summary = {"stage": step, "reference_row_counts": {role: len(rows) for role, rows in bundle["references"].items()},
+#=                   "note": "Reference parsing completed; approved business mappings still require internal review."}
+#=    elif step == "sld":
+#=        bundle = load_sources(cfg)
+#=        summary = {"stage": step, "source_row_counts": {role: len(rows) for role, rows in bundle["tables"].items()},
+#=                   "coverage": {role: {k: val for k, val in value.items() if k in {"complete", "status", "rows", "chunks_completed", "chunks_started"}}
+#=                                for role, value in bundle["coverage"].items()}}
+# COPY BLOCK 3
+#=    else:
+#=        bundle = load_sources(cfg)
+#=        snapshot = prepare_snapshot(bundle, cfg)
+#=        summary = {"stage": step, "rfq_count": len(snapshot["rows"]), "quality": snapshot.get("quality", {}),
+#=                   "capabilities": snapshot.get("capabilities", {})}
+#=        if step == "metrics":
+#=            from coupon_lab.shared.metrics import monthly
+#=            # Aggregate quality only; monetary results remain internal run outputs.
+#=            for platform in ("PLATFORM_A", "PLATFORM_B"):
+#=                monthly([r for r in snapshot["rows"] if r["platform"] == platform])
+#=            summary["metric_validation"] = "Core aggregate calculations completed; reconcile actual results internally."
+#=    print(dumps(summary))

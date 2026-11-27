@@ -1,0 +1,488 @@
+#+fictional tests, two-PC behavior, source observations, internally reconciled
+#+figures and pending items. Give exact commands to resume. Describe the first
+#+failure by stage and confirmed cause, keeping private paths/code/records in the
+#+internal worklog. Produce a concise numbered summary of useful field meanings,
+#+units, quality counts and unresolved decisions for me to select and handwrite.
+#+I will choose what I bring back. Keep the original app, accepted pilot state
+#+and reporting backup distinguishable, and account for any writes after backup.
+# FILE {"kind": "companion", "name": "RUN_OFFICE_CHECKS.py.txt", "new_lf": true}
+#+"""Run local Coupon Lab office checks using Python's standard library.
+#+
+#+Run this TXT directly. The interpreter must be the one used by the app.
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "APP_FOLDER" environment
+#+  python RUN_OFFICE_CHECKS.py.txt --app "APP_FOLDER" source --date 2026-11-27
+#+  python RUN_OFFICE_CHECKS.py.txt --app "APP_FOLDER" store-init
+#+  python RUN_OFFICE_CHECKS.py.txt --app "APP_FOLDER" store-check
+#+  python RUN_OFFICE_CHECKS.py.txt --app "APP_FOLDER" store-copy --source "OLD.sqlite3" --destination "NEW.sqlite3"
+#+
+#+Global --settings SETTINGS_FILE selects another settings JSON (relative to app).
+#+Relative input/store paths follow that settings file's folder, as in the app.
+#+Global --output NEW_REPORT.json additionally saves the printed JSON. The output
+#+file must be new. Neither option is required. Outputs contain fixed metadata,
+#+aggregate counts, selected dates/months and random synthetic probe identifiers.
+#+They omit records, monetary totals, source SQL, paths and driver exceptions.
+#+
+#+source calls the installed daily_source.read_day, using the existing read-only
+#+office hook. It never opens the manual store or saves an immutable capture.
+#+store-init initializes the selected daily_reporting.store with the installed
+#+DailyStore. store-check requires an existing current-format reporting store.
+#+Foreign/pricing/prototype schemas are rejected before any store writes.
+#+store-copy only accepts the current reporting schema, opens its source read-only,
+#+uses SQLite backup into a new destination, and checks integrity/counts. It
+#+performs no migration and never overwrites an existing destination.
+#+
+#+Optional two-PC checks use ONLY a separate sibling of the reporting store named
+#+<store stem>.office-share-test.sqlite3. No real reporting entries are written.
+#+  PC A: ... share-init
+#+  PC B: ... share-check
+#+  PC A: ... share-update --expected-revision 1
+#+  PC B: ... share-update --expected-revision 1     (CONFLICT, exit code 3)
+#+  PC B: ... share-check                         (same probe ID, revision 2)
+#+--token TEXT on share-update permits retry of the same expected-revision action.
+#+Run share-init first on A, then the B checks. Re-running share-init retains the
+#+existing marked probe. A file lacking the dedicated probe marker is rejected.
+#+Local process checks do not establish network filesystem locking/support.
+#+
+#+Exit codes: 0 completed, 1 check/setup failure, 2 invalid arguments, 3 stale
+#+revision conflict. A completed source read may report unresolved data.
+#+"""
+#+from __future__ import annotations
+#+
+#+import argparse
+#+from collections import Counter
+#+from datetime import date
+#+from decimal import Decimal
+#+import hashlib
+#+from importlib import import_module, metadata
+#+import json
+#+from pathlib import Path
+#+import platform
+#+import re
+#+import sqlite3
+#+import sys
+#+from time import perf_counter
+#+from uuid import uuid4
+#+
+#+
+#+VERSION = "daily-office-checks-r2.1"
+#+TABLES = {
+#+    "daily_meta": ("version",),
+#+    "daily_snapshots": ("day", "source_json", "source_hash", "saved_at"),
+#+    "daily_entries": ("id", "report_day", "revision", "removed", "entry_json"),
+#+    "daily_revisions": ("entry_id", "revision", "entry_json"),
+#+    "daily_retries": ("token", "request_hash", "result_json", "created_at"),
+#+}
+#+PROBE_TABLE = "office_share_probe"
+#+PROBE_COLUMNS = ("marker", "version", "entry_id")
+#+PROBE_DAY = "2000-01-03"
+#+FLOW = ("eflow", "voiceflow", "unknown")
+#+MONTH = re.compile(r"[0-9]{4}-(?:0[1-9]|1[0-2])\Z")
+#+CURRENCY = re.compile(r"[A-Z]{3}\Z")
+#+
+#+
+#+class CheckError(Exception):
+#+    def __init__(self, stage, action, code="check_failed"):
+#+        self.stage, self.action, self.code = stage, action, code
+#+        super().__init__(stage)
+#+
+#+
+#+class SafeParser(argparse.ArgumentParser):
+#+    def error(self, message):
+#+        self.exit(2, 'Invalid arguments. Run --help and use the documented command/options.\n')
+#+
+#+
+#+def fail(stage, action, code="check_failed"):
+#+    raise CheckError(stage, action, code)
+#+
+#+
+#+def uri(path, mode="ro"):
+#+    value = path.as_uri()
+#+    # Windows UNC names need an empty SQLite URI authority, as in the app.
+#+    if value.startswith("file://") and not value.startswith("file:///"):
+#+        value = "file:////" + value[len("file://"):]
+#+    return value + "?mode=" + mode
+#+
+#+
+#+def read_connection(path):
+#+    if not path.is_file():
+#+        fail("store", "Check the selected existing reporting database.", "store_missing")
+#+    connection = sqlite3.connect(uri(path), uri=True, timeout=5)
+#+    connection.execute("PRAGMA query_only=ON")
+#+    connection.execute("BEGIN")
+#+    return connection
+#+
+#+
+#+def inspect(connection, *, probe=False):
+#+    names = {row[0] for row in connection.execute(
+#+        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
+#+    expected = set(TABLES) | ({PROBE_TABLE} if probe else set())
+#+    if names != expected:
+#+        fail("store schema", "Use a separate current-format Daily Reporting store. Pricing and prototype databases cannot be used here.", "foreign_schema")
+#+    for name, columns in {**TABLES, **({PROBE_TABLE: PROBE_COLUMNS} if probe else {})}.items():
+#+        observed = tuple(row[1] for row in connection.execute('PRAGMA table_info("' + name + '")'))
+#+        if observed != columns:
+#+            fail("store schema", "Use the reporting database produced by this installed app version.", "schema_mismatch")
+#+    if connection.execute("SELECT version FROM daily_meta").fetchall() != [(1,)]:
+#+        fail("store schema", "Use a reporting store with the supported daily_meta version.", "schema_version")
+#+    if connection.execute("PRAGMA quick_check").fetchall() != [("ok",)]:
+#+        fail("store integrity", "Retain the database and review its supported backup/recovery route.", "integrity")
+#+    journal = connection.execute("PRAGMA journal_mode").fetchone()[0].lower()
+#+    if journal not in {"delete", "truncate", "persist"}:
+#+        fail("store journal", "Use the owner-supported rollback-journal reporting store. This command changes no journal mode.", "journal_mode")
+#+    counters = {name + "_rows": connection.execute('SELECT COUNT(*) FROM "' + name + '"').fetchone()[0]
+#+                for name in TABLES}
+#+    counters["active_entries"] = connection.execute("SELECT COUNT(*) FROM daily_entries WHERE removed=0").fetchone()[0]
+#+    counters["removed_entries"] = connection.execute("SELECT COUNT(*) FROM daily_entries WHERE removed=1").fetchone()[0]
+#+    counters["orphan_revision_rows"] = connection.execute(
+#+        "SELECT COUNT(*) FROM daily_revisions r LEFT JOIN daily_entries e ON e.id=r.entry_id WHERE e.id IS NULL").fetchone()[0]
+#+    return {"schema_marker": "daily_meta:1", "schema_tables": len(TABLES),
+#+            "integrity_ok": True, "journal_mode": journal, "counters": counters}
+#+
+#+
+#+def inspect_path(path, *, probe=False):
+#+    connection = None
+#+    try:
+#+        connection = read_connection(path)
+#+        return inspect(connection, probe=probe)
+#+    finally:
+#+        if connection is not None:
+#+            connection.close()
+#+
+#+
+#+def module(app, name):
+#+    result = import_module("coupon_lab." + name)
+#+    location = Path(result.__file__).resolve()
+#+    if not location.is_relative_to(app / "coupon_lab"):
+#+        fail("app identity", "Run in a fresh terminal process with the selected app's Python environment.", "module_identity")
+#+    return result
+#+
+#+
+#+def configuration(app, filename):
+#+    path = Path(filename)
+#+    path = path if path.is_absolute() else app / path
+#+    try:
+#+        cfg = json.loads(path.read_text(encoding="utf-8-sig"))
+#+        if not isinstance(cfg, dict) or not isinstance(cfg.get("daily_reporting", {}), dict):
+#+            raise ValueError()
+#+    except Exception:
+#+        fail("settings", "Check the selected app settings JSON and daily_reporting section.", "settings")
+#+    cfg["_root"] = path.resolve().parent
+#+    return cfg
+#+
+#+
+#+def store_path(cfg):
+#+    value = cfg.get("daily_reporting", {}).get("store", "../coupon_lab_reporting/daily.sqlite3")
+#+    if not isinstance(value, str) or not value.strip():
+#+        fail("settings", "Set daily_reporting.store to the separate shared reporting database.", "store_path")
+#+    path = Path(value)
+#+    path = (cfg["_root"] / path).resolve() if not path.is_absolute() else path.resolve()
+#+    # Legacy discovery settings may still identify the pricing source. Never
+#+    # let it become the reporting write target, even if its file is empty.
+#+    daily = cfg.get("daily_reporting", {})
+#+    sources = [daily.get("voiceflow_database"), daily.get("source", {}).get("voiceflow_database")]
+#+    for candidate in sources:
+#+        if candidate:
+#+            source = Path(candidate)
+#+            source = (cfg["_root"] / source).resolve() if not source.is_absolute() else source.resolve()
+#+            if source == path:
+#+                fail("store identity", "Select a reporting database distinct from the voice pricing source.", "pricing_target")
+#+    return path
+#+
+#+
+#+def environment(app):
+#+    packages = {}
+#+    for name in ("dash", "plotly", "Flask", "openpyxl", "pandas", "waitress"):
+#+        try:
+#+            packages[name] = {"distribution_version": metadata.version(name), "metadata_available": True}
+#+        except metadata.PackageNotFoundError:
+#+            packages[name] = {"distribution_version": None, "metadata_available": False}
+#+    try:
+#+        from zoneinfo import ZoneInfo
+#+        ZoneInfo("Europe/Zurich")
+#+        timezone_available = True
+#+    except Exception:
+#+        timezone_available = False
+#+    result = {"python_version": platform.python_version(), "operating_system": platform.system(),
+#+            "sqlite_version": sqlite3.sqlite_version, "packages": packages,
+#+            "minimum_app_python": "3.12", "python_supported": sys.version_info >= (3, 12),
+#+            "zurich_timezone_available": timezone_available,
+#+            "package_check_scope": "Distribution metadata only; imports and app compatibility are not exercised.",
+#+            "daily_source_present": (app / "coupon_lab/daily_source.py").is_file(),
+#+            "daily_store_present": (app / "coupon_lab/daily_store.py").is_file(),
+#+            "driver_installed_by_check": False, "source_connected": False}
+#+    if not result["python_supported"]:
+#+        error = CheckError("environment", "Use the app's approved Python 3.12 or newer environment.", "python_version")
+#+        error.details = result
+#+        raise error
+#+    if not timezone_available:
+#+        error = CheckError("environment", "Use the approved Python environment with Europe/Zurich IANA timezone data available.", "timezone_data")
+#+        error.details = result
+#+        raise error
+#+    return result
+#+
+#+
+#+def source_report(app, cfg, selected):
+#+    try:
+#+        day = date.fromisoformat(selected)
+#+        if day.isoformat() != selected:
+#+            raise ValueError()
+#+    except (ValueError, TypeError):
+#+        fail("source arguments", "Use a selected report date in YYYY-MM-DD format.", "date")
+#+    started = perf_counter()
+#+    try:
+#+        source = module(app, "daily_source").read_day(cfg, day)
+#+    except Exception as error:
+#+        # Only extract known component labels from authored diagnostics. No
+#+        # exception payload, SELECT text or configured values are printed.
+#+        text = str(error) if getattr(error, "safe_message", False) else ""
+#+        role = next((name for name in ("requests", "trades", "hedges", "FX", "settings", "dates", "SLD", "report")
+#+                     if text.startswith("[daily source] " + name + " /")), None)
+#+        fail("source " + (role or "read"), "Check the installed daily source aliases, approved office connection and selected-day query. Keep the previous good capture.",
+#+             "source_" + role.lower() if role else "source_read")
+#+    requests, trades = source["requests"], source["trades"]
+#+    coverage = source.get("coverage", {})
+#+    observed = Counter(item.get("flow") for item in trades)
+#+    months = {}
+#+    for item in trades:
+#+        currency, month = item.get("currency"), item.get("fx_month")
+#+        if isinstance(currency, str) and CURRENCY.fullmatch(currency):
+#+            if currency == "CHF" and item.get("fx_rate") is not None:
+# COPY BLOCK 28
+#+                label = "identity"
+#+            elif isinstance(month, str) and MONTH.fullmatch(month):
+#+                label = month
+#+            else:
+#+                label = "unresolved"
+#+            counts = months.setdefault(currency, {})
+#+            counts[label] = counts.get(label, 0) + 1
+#+    thresholds = Counter()
+#+    for item in trades:
+#+        if item.get("flow") != "eflow":
+#+            continue
+#+        if item.get("chf") is None:
+#+            thresholds["unresolved"] += 1
+#+        else:
+#+            amount = Decimal(item["chf"])
+#+            thresholds["above" if amount > 500000 else "equal" if amount == 500000 else "below"] += 1
+#+    counter_names = ("request_ids", "request_rows", "duplicate_request_rows", "trade_rows",
+#+                     "traded_rfqs", "duplicate_trade_rows", "unresolved_trade_groups", "floating_numeric_inputs")
+#+    count_profile = {name: coverage[name] for name in counter_names if type(coverage.get(name)) is int}
+#+    missing = {name: value for name, value in coverage.get("missing", {}).items()
+#+               if name in {"amount", "currency", "fx", "pnl", "underlyings", "provider", "ambiguous_provider"} and type(value) is int}
+#+    flags = {name: value for name, value in coverage.items()
+#+             if name in {"trades_complete", "profile_confirmed", "fx_reference_available", "hedge_enrichment_available"} and type(value) is bool}
+#+    return {"day": selected, "timezone": "Europe/Zurich", "read_elapsed_seconds": round(perf_counter() - started, 4),
+#+            "request_counts": {flow: requests.get(flow) for flow in FLOW},
+#+            "trade_counts_observed": {flow: observed[flow] for flow in FLOW},
+#+            "unknown_trade_rows": observed["unknown"], "unresolved_trade_groups": len(source.get("unresolved_trades", [])),
+#+            "coverage_counters": count_profile, "missing_field_counts": missing, "coverage_flags": flags,
+#+            "provider_provisional_rows": sum(item.get("provider_provisional") is True for item in trades),
+#+            "flow_provisional_rows": sum(item.get("flow_provisional") is True for item in trades),
+#+            "fx_month_coverage": months,
+#+            "eflow_threshold_counts": {name: thresholds[name] for name in ("below", "equal", "above", "unresolved")},
+#+            "warning_count": len(source.get("warnings", [])), "immutable_capture_written": False,
+#+            "manual_store_opened": False, "synthetic_source": source.get("mode") == "demo"}
+#+
+#+
+#+def store_report(app, cfg, initialize):
+#+    path = store_path(cfg)
+#+    existed = path.exists()
+#+    if existed:
+#+        inspect_path(path)
+#+    elif not initialize:
+#+        fail("store", "Run store-init once for the configured new reporting database.", "store_missing")
+#+    if initialize:
+#+        try:
+#+            module(app, "daily_store").DailyStore(path)
+#+        except Exception:
+#+            fail("store initialization", "Check the separate reporting path, write access and supported rollback-journal filesystem.", "store_init")
+#+    result = inspect_path(path)
+#+    result.update({"created": not existed, "production_entries_written": False,
+#+                   "configured_file_reference": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+#+                   "file_reference_scope": "Local resolved-path reference; different drive mappings may differ. Use the shared probe for cross-PC visibility."})
+#+    return result
+#+
+#+
+#+def copy_store(app, source_name, destination_name):
+#+    source, target = Path(source_name).resolve(), Path(destination_name).resolve()
+#+    if target.exists():
+#+        fail("store copy", "Choose a NEW destination file. Existing destinations are never overwritten.", "destination_exists")
+#+    read = write = None
+#+    created = False
+#+    try:
+#+        read = read_connection(source)
+#+        before = inspect(read)
+#+        target.parent.mkdir(parents=True, exist_ok=True)
+#+        # Exclusive creation prevents an existing file from being selected as
+#+        # the backup destination, including if it appeared after the check.
+#+        with target.open("xb"):
+#+            pass
+#+        created = True
+#+        write = sqlite3.connect(str(target))
+#+        read.backup(write, pages=256)
+#+        write.close()
+#+        write = None
+#+        after = inspect_path(target)
+#+        compared = ("schema_marker", "schema_tables", "integrity_ok", "counters")
+#+        if any(before[key] != after[key] for key in compared):
+#+            fail("store copy", "Source and destination aggregate/schema checks differ. Keep the original and review the copy.", "copy_mismatch")
+#+        module(app, "daily_store").DailyStore(target)
+#+        return {"source_schema": before["schema_marker"], "destination_schema": after["schema_marker"],
+#+                "source_counters": before["counters"], "destination_counters": after["counters"],
+#+                "counts_reconciled": True, "integrity_ok": True, "source_opened_read_only": True,
+#+                "destination_was_new": True, "configuration_changed": False}
+#+    except Exception:
+#+        if write is not None:
+#+            write.close()
+#+            write = None
+#+        if created:
+#+            try:
+#+                target.unlink()
+#+            except OSError:
+#+                pass
+#+        raise
+#+    finally:
+#+        if read is not None:
+#+            read.close()
+#+        if write is not None:
+#+            write.close()
+#+
+#+
+#+def probe_path(cfg):
+#+    path = store_path(cfg)
+#+    return path.with_name(path.stem + ".office-share-test.sqlite3")
+#+
+#+
+#+def probe_marker(path):
+#+    connection = None
+#+    try:
+#+        connection = read_connection(path)
+#+        inspect(connection, probe=True)
+#+        rows = connection.execute("SELECT marker,version,entry_id FROM office_share_probe").fetchall()
+#+        if (len(rows) != 1 or rows[0][1] != 1 or not isinstance(rows[0][0], str)
+#+                or not re.fullmatch(r"[0-9a-f]{32}", rows[0][0])):
+#+            fail("shared probe", "Use the dedicated TEST database created by share-init.", "probe_identity")
+#+        return rows[0][0], rows[0][2]
+#+    finally:
+#+        if connection is not None:
+#+            connection.close()
+#+
+#+
+#+def probe_values(amount=None):
+#+    return {"event_type": "win", "product_type": "Fictional shared access probe",
+#+            "currency": "CHF", "amount": amount, "provider": "Fictional provider", "underlyings": "FICTIONAL A"}
+#+
+#+
+#+def shared_probe(app, cfg, command, revision=None, token=None):
+#+    path = probe_path(cfg)
+#+    store_module = module(app, "daily_store")
+#+    if command == "share-init" and not path.exists():
+#+        path.parent.mkdir(parents=True, exist_ok=True)
+#+        with path.open("xb"):
+#+            pass
+#+        store_module.DailyStore(path)
+#+        with sqlite3.connect(str(path)) as connection:
+#+            connection.execute("CREATE TABLE office_share_probe (marker TEXT NOT NULL, version INTEGER NOT NULL, entry_id TEXT)")
+#+            connection.execute("INSERT INTO office_share_probe VALUES (?,1,NULL)", (uuid4().hex,))
+#+    marker, entry_id = probe_marker(path)
+#+    store = store_module.DailyStore(path)
+#+    if command == "share-init" and entry_id is None:
+#+        added = store.add(PROBE_DAY, probe_values(), "office-probe-create-" + marker)
+#+        entry_id = added["id"]
+#+        with sqlite3.connect(str(path)) as connection:
+#+            connection.execute("UPDATE office_share_probe SET entry_id=? WHERE marker=? AND entry_id IS NULL", (entry_id, marker))
+#+    if not entry_id:
+#+        fail("shared probe", "Finish share-init on PC A before checking from PC B.", "probe_incomplete")
+#+    accepted = None
+#+    if command == "share-update":
+#+        if type(revision) is not int or revision < 1:
+#+            fail("shared probe", "Supply a positive expected revision from share-check.", "revision")
+#+        token = token or uuid4().hex
+#+        try:
+#+            accepted = store.update(entry_id, revision, probe_values(str(revision + 1)), token, day=PROBE_DAY)
+#+        except store_module.DailyStoreError as error:
+#+            if error.code == "conflict":
+#+                fail("shared probe", "The stale edit was rejected. Run share-check and keep the newer revision.", "conflict")
+#+            fail("shared probe", "Review the test database access and use the same token only for the identical save attempt.",
+#+                 error.code if error.code in {"retry_conflict", "busy", "validation"} else "probe_write")
+#+    entries = store.entries(PROBE_DAY)
+#+    current = next((entry for entry in entries if entry["id"] == entry_id), None)
+#+    if current is None:
+#+        fail("shared probe", "The dedicated synthetic entry is unavailable. Review the TEST database.", "probe_entry")
+#+    result = {"probe_id": marker, "current_revision": current["revision"],
+#+              "retained_revisions": len(store.history(entry_id)), "test_database_only": True,
+#+              "production_entries_written": False, "entry_count": len(entries)}
+#+    if accepted:
+#+        result.update({"accepted_operation_revision": accepted["revision"], "retry_token": token})
+#+    return result
+#+
+#+
+#+def main(argv=None):
+#+    parser = SafeParser(description=__doc__)
+#+    parser.add_argument("--app", required=True)
+#+    parser.add_argument("--settings", default="settings.json")
+#+    parser.add_argument("--output")
+#+    commands = parser.add_subparsers(dest="command", required=True)
+#+    commands.add_parser("environment")
+#+    source = commands.add_parser("source")
+#+    source.add_argument("--date", required=True)
+#+    commands.add_parser("store-init")
+#+    commands.add_parser("store-check")
+#+    copy = commands.add_parser("store-copy")
+#+    copy.add_argument("--source", required=True)
+#+    copy.add_argument("--destination", required=True)
+#+    commands.add_parser("share-init")
+#+    commands.add_parser("share-check")
+#+    update = commands.add_parser("share-update")
+#+    update.add_argument("--expected-revision", required=True, type=int)
+#+    update.add_argument("--token")
+#+    args = parser.parse_args(argv)
+#+    started = perf_counter()
+#+    exit_code = 0
+#+    try:
+#+        app = Path(args.app).resolve(strict=True)
+#+        if not (app / "coupon_lab").is_dir():
+#+            fail("app", "Select the installed app folder containing coupon_lab.", "app")
+#+        sys.path.insert(0, str(app))
+#+        if args.command == "environment":
+#+            result = environment(app)
+#+        elif args.command == "store-copy":
+#+            result = copy_store(app, args.source, args.destination)
+#+        else:
+#+            cfg = configuration(app, args.settings)
+#+            if args.command == "source":
+#+                result = source_report(app, cfg, args.date)
+#+            elif args.command in {"store-init", "store-check"}:
+#+                result = store_report(app, cfg, args.command == "store-init")
+#+            else:
+#+                result = shared_probe(app, cfg, args.command, getattr(args, "expected_revision", None), getattr(args, "token", None))
+#+        payload = {"tool_version": VERSION, "command": args.command, "result": "COMPLETED", "checks": result}
+#+    except CheckError as error:
+#+        exit_code = 3 if error.code == "conflict" else 1
+#+        payload = {"tool_version": VERSION, "command": args.command,
+#+                   "result": "CONFLICT" if exit_code == 3 else "FAIL", "stage": error.stage,
+#+                   "code": error.code, "next_action": error.action}
+#+        if hasattr(error, "details"):
+#+            payload["checks"] = error.details
+#+    except Exception:
+#+        exit_code = 1
+#+        payload = {"tool_version": VERSION, "command": args.command, "result": "FAIL",
+#+                   "stage": "selected check", "code": "check_failed",
+#+                   "next_action": "Check the selected app/settings/file access and supported local runtime. Raw exceptions are intentionally omitted."}
+#+    payload["elapsed_seconds"] = round(perf_counter() - started, 4)
+#+    encoded = json.dumps(payload, indent=2, ensure_ascii=True, allow_nan=False)
+#+    if args.output:
+#+        try:
+#+            with Path(args.output).open("x", encoding="utf-8", newline="\n") as handle:
+#+                handle.write(encoded + "\n")
+#+        except Exception:
+#+            print('Output file could not be created. Choose a new writable report path; the check result follows.')
+#+            exit_code = exit_code or 1
+#+    print(encoded)
+#+    return exit_code
+#+
+#+
+#+if __name__ == "__main__":
+#+    raise SystemExit(main())
+# END OFFICE PAYLOAD

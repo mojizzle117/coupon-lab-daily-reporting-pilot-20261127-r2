@@ -1,0 +1,430 @@
+#+                                     confirmed_missing=confirmed_missing)
+#+                        message = 'Entry confirmed absent from SLD.' if confirmed_missing else 'Entry linked to SLD.'
+#+            if action == 'daily-new':
+#+                nonce = uuid.uuid4().hex
+#+                message = 'Ready for a new entry.'
+#+            view = service.capture(day) if action == 'daily-capture' else service.load(day)
+#+            if view.get('refresh_error'):
+#+                message = ' '.join(filter(None, [message, str(view['refresh_error'])]))
+#+            if action == 'daily-capture':
+#+                message = 'Saved day snapshot available. ' + str(view.get('capture_label') or '')
+#+            return [view, render(view, service.today()), source_status(view), message, _day_options(service, day),
+#+                    _entry_options(view), view.get('voice_options') or [], nonce]
+#+        except Exception as error:
+#+            message = _safe_error(error)
+#+            good = previous if previous and previous.get('day') == day else None
+#+            if good:
+#+                return [no_update, render(good, service.today()), source_status(good) + ' · Refresh/action failed; displaying last good results.',
+#+                        message, no_update, no_update, no_update, no_update]
+#+            return [None, html.P('No successful report is available for the selected day. Manual form inputs are retained.'), '',
+#+                    message, no_update, [], [], no_update]
+#+
+#+    @app.callback(Output('daily-day', 'value'), Input('daily-today', 'n_clicks'),
+#+                  Input('daily-previous', 'n_clicks'), Input('location', 'pathname'))
+#+    def choose_day(today_clicks, previous_clicks, path):
+#+        if service is None:
+#+            raise PreventUpdate
+#+        if ctx.triggered_id not in ('daily-today', 'daily-previous') and report_path(app, path) != '/daily-reporting':
+#+            raise PreventUpdate
+#+        return _iso(service.today() if ctx.triggered_id == 'daily-today' else service.previous_day())
+#+
+#+    @app.callback([Output('daily-' + name, 'value') for name in FORM_FIELDS] + [Output('daily-entry', 'value')],
+#+                  Input('daily-new', 'n_clicks'), prevent_initial_call=True)
+#+    def clear_editor(clicks):
+#+        if not clicks:
+#+            raise PreventUpdate
+#+        return ['win', '', '', '', '', '', None, None]
+# FILE {"kind": "app", "name": "coupon_lab/ui/assets/daily-reporting.css", "new_lf": true}
+#+/* Daily Reporting only. Existing monthly report selectors remain unchanged. */
+#+.daily-page { padding:18px 22px 35px; max-width:1600px; margin:auto; }
+#+.daily-heading { display:flex; align-items:end; justify-content:space-between; gap:16px; margin-bottom:15px; }
+#+.daily-heading h1 { font-size:25px; }
+#+.daily-demo-label { background:var(--gold-light); border:1px solid #e3d4b5; color:#775719; padding:7px 10px; margin-bottom:10px; border-radius:3px; }
+#+.daily-muted { color:var(--muted); font-size:11px; line-height:1.5; }
+#+.daily-toolbar { display:flex; align-items:end; gap:8px; flex-wrap:wrap; padding:10px; background:#fff; border:1px solid var(--line); border-radius:4px; }
+#+.daily-toolbar .filter-field { flex-basis:210px; }
+#+.daily-source { padding:8px 2px 12px; color:var(--muted); font-size:11px; }
+#+.daily-message:empty { display:none; }
+#+.daily-message { margin-top:9px; padding:9px 11px; background:#edf5ff; border-left:3px solid var(--blue); overflow-wrap:anywhere; }
+#+.daily-context { color:var(--muted); margin:0 0 10px; font-size:11px; }
+#+.daily-context strong { color:var(--blue); }
+#+.daily-kpis { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:8px; margin-bottom:12px; }
+#+.daily-kpis .kpi-card { min-width:0; padding:12px; }
+#+.daily-kpis .kpi-value { font-size:20px; overflow-wrap:anywhere; }
+#+.daily-warnings { background:#fbf7ed; color:#70552d; border:1px solid #eadcc1; border-radius:4px; padding:10px 12px 10px 29px; margin:0 0 12px; font-size:11px; }
+#+.daily-page .panel { margin-bottom:12px; }
+#+.daily-page .plain-table { min-width:0; }
+#+.daily-page table { width:100%; border-collapse:collapse; table-layout:fixed; }
+#+.daily-page th,.daily-page td { padding:8px; text-align:left; border-bottom:1px solid var(--line); overflow-wrap:anywhere; vertical-align:top; }
+#+.daily-page th { background:#f5f7fa; font-size:11px; color:var(--muted); }
+#+.daily-form-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; margin:12px 0; }
+#+.daily-input { width:100%; min-height:33px; padding:6px 8px; color:var(--ink); background:#fff; border:1px solid var(--control-line); border-radius:3px; }
+#+.daily-actions { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
+#+.daily-form-subtitle { margin:18px 0 10px; font-size:13px; }
+#+.daily-editor .filter-field { max-width:none; }
+#+@media(max-width:1100px) { .daily-kpis { grid-template-columns:repeat(3,minmax(0,1fr)); } }
+#+@media(max-width:650px) {
+#+  .daily-page { padding:12px; }
+#+  .daily-heading { align-items:start; flex-direction:column; gap:5px; }
+#+  .daily-kpis { grid-template-columns:repeat(2,minmax(0,1fr)); }
+#+  .daily-form-grid { grid-template-columns:1fr; }
+#+  .daily-page .panel-body { overflow-x:auto; }
+#+  .daily-page table { min-width:650px; }
+#+}
+#+@media print { .daily-toolbar,.daily-editor,.daily-message { display:none!important; } .daily-page { padding:0; } }
+# FILE {"kind": "app", "name": "tests/test_daily_store.py", "new_lf": true}
+#+"""Exercise Daily Reporting persistence with fictional local SQLite state.
+#+
+#+These tests cover committed retries, concurrent connections, revision history,
+#+immutable SLD captures and subscription reconciliation. They establish local
+#+store behavior, with two-PC/network filesystem acceptance remaining at work.
+#+"""
+#+from concurrent.futures import ThreadPoolExecutor
+#+from copy import deepcopy
+#+from pathlib import Path, PureWindowsPath
+#+import sqlite3
+#+import sys
+#+import tempfile
+#+import threading
+#+import unittest
+#+from unittest.mock import patch
+#+
+#+ROOT = Path(__file__).resolve().parents[1]
+#+sys.path.insert(0, str(ROOT))
+#+from coupon_lab.daily_store import DailyStore, DailyStoreError, _sqlite_uri
+#+
+#+
+#+DAY = "2026-11-26"
+#+
+#+
+#+def trade(identifier="V1", flow="voiceflow", **overrides):
+#+    return {"id": identifier, "flow": flow, "product_type": "Fictional note",
+#+            "amount": "1000000", "currency": "CHF", "underlyings": "FICTIONAL SW",
+#+            "provider": "Provider A", "platform": "Voice", "chf": "1000000", "pnl_chf": "10000",
+#+            **overrides}
+#+
+#+
+#+def source(*trades, day=DAY, read_at="2026-11-26T17:30:00+00:00"):
+#+    return {"day": day, "read_at": read_at,
+#+            "requests": {"eflow": 5, "voiceflow": 3, "unknown": 1}, "trades": list(trades)}
+#+
+#+
+#+def values(event_type="win", **overrides):
+#+    return {"event_type": event_type, "product_type": "Fictional note", "amount": None,
+#+            "currency": "CHF", "underlyings": "FICTIONAL SW", "provider": "Provider A", **overrides}
+#+
+#+
+#+class DailyStoreTests(unittest.TestCase):
+#+    def setUp(self):
+#+        self.temporary = tempfile.TemporaryDirectory()
+#+        self.addCleanup(self.temporary.cleanup)
+#+        self.path = Path(self.temporary.name) / "shared" / "manual.sqlite"
+#+        self.store = DailyStore(self.path)
+#+
+#+    def assert_code(self, expected, operation):
+#+        with self.assertRaises(DailyStoreError) as caught:
+#+            operation()
+#+        self.assertEqual(caught.exception.code, expected)
+#+        return caught.exception
+#+
+#+    def test_capture_is_immutable_and_survives_reconnect(self):
+#+        original = source(trade())
+#+        captured = self.store.capture(original, "capture-one")
+#+        self.assertEqual(captured, self.store.capture(original, "capture-one"))
+#+        original["trades"][0]["amount"] = "123"
+#+        other = DailyStore(self.path)
+#+        self.assertEqual(other.snapshot(DAY)["trades"][0]["amount"], "1000000")
+#+        self.assert_code("snapshot_exists", lambda: other.capture(original, "capture-new-content"))
+#+        report = other.load(DAY)
+#+        self.assertEqual(report["source_state"], "saved")
+#+        self.assertEqual(report["snapshot_saved_at"], captured["saved_at"])
+#+        self.assertEqual(report["voiceflow"]["trade_count"], 1)
+#+
+#+    def test_saved_source_and_latest_manual_changes_are_read_together(self):
+#+        self.store.capture(source(), "snapshot")
+#+        added = self.store.add(DAY, values(), "win")
+#+        first = self.store.load(DAY)
+#+        self.assertEqual(first["subscription_wins"][0]["id"], added["id"])
+#+        self.store.remove(added["id"], 1, "remove")
+#+        second = DailyStore(self.path).load(DAY)
+# COPY BLOCK 20
+#+        self.assertEqual(second["subscription_wins"], [])
+#+        self.assertEqual(first["read_at"], second["read_at"])
+#+        self.assertEqual(first["snapshot_saved_at"], second["snapshot_saved_at"])
+#+
+#+    def test_no_snapshot_keeps_manual_state_without_inventing_source_zero(self):
+#+        self.store.add(DAY, values("issuance", amount="500", confirmed_missing=True), "manual")
+#+        report = self.store.load(DAY)
+#+        self.assertEqual(report["source_state"], "missing")
+#+        self.assertIsNone(report["eflow"]["trade_count"])
+#+        self.assertIsNone(report["voiceflow"]["trade_count"])
+#+        self.assertEqual(report["voiceflow"]["manual_trade_count"], 1)
+#+        self.assertEqual(len(report["subscription_issuances"]), 1)
+#+        self.assertTrue(report["voiceflow"]["provisional"])
+#+
+#+    def test_recorded_days_include_removed_manual_only_days(self):
+#+        added = self.store.add("2026-11-25", values(), "older")
+#+        self.store.remove(added["id"], 1, "removed")
+#+        self.store.capture(source(), "saved")
+#+        self.assertEqual(self.store.days(), ["2026-11-25", DAY])
+#+        self.assertEqual(self.store.entries("2026-11-25"), [])
+#+        self.assertTrue(self.store.entries("2026-11-25", include_removed=True)[0]["removed"])
+#+
+#+    def test_retry_replays_original_result_after_update_and_removal(self):
+#+        added = self.store.add(DAY, values(), "original-add")
+#+        updated = self.store.update(added["id"], 1, values(amount="25"), "original-update")
+#+        self.store.remove(added["id"], 2, "original-remove")
+#+        reopened = DailyStore(self.path)
+#+        self.assertEqual(reopened.add(DAY, values(), "original-add"), added)
+#+        self.assertEqual(reopened.update(added["id"], 1, values(amount="25"), "original-update"), updated)
+#+        history = reopened.history(added["id"])
+#+        self.assertEqual([item["revision"] for item in history], [1, 2, 3])
+#+        self.assertFalse(history[0]["removed"])
+#+        self.assertTrue(history[2]["removed"])
+#+
+#+    def test_token_reuse_with_different_content_or_operation_conflicts(self):
+#+        added = self.store.add(DAY, values(), "same-token")
+#+        self.assert_code("retry_conflict", lambda: self.store.add(DAY, values(amount="1"), "same-token"))
+#+        self.assert_code("retry_conflict", lambda: self.store.remove(added["id"], 1, "same-token"))
+#+        self.assertEqual(len(self.store.entries(DAY)), 1)
+#+
+#+    def test_failed_write_rolls_back_entry_history_and_retry(self):
+#+        persist = self.store._persist
+#+
+#+        def interrupted(connection, entry):
+#+            persist(connection, entry)
+#+            raise DailyStoreError("storage", "Fictional interrupted commit.")
+#+
+#+        with patch.object(self.store, "_persist", side_effect=interrupted):
+#+            self.assert_code("storage", lambda: self.store.add(DAY, values(), "interrupted"))
+#+        self.assertEqual(self.store.entries(DAY), [])
+#+        with sqlite3.connect(self.path) as connection:
+#+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM daily_revisions").fetchone()[0], 0)
+#+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM daily_retries").fetchone()[0], 0)
+#+        self.assertEqual(self.store.add(DAY, values(), "interrupted")["revision"], 1)
+#+
+#+    def test_stale_revision_and_wrong_report_day_do_not_mutate(self):
+#+        added = self.store.add(DAY, values("issuance"), "entry")
+#+        self.assert_code("validation", lambda: self.store.link(added["id"], 1, "V1", "wrong-day", day="2026-11-25"))
+#+        self.assert_code("validation", lambda: self.store.remove(added["id"], 1, "wrong-day-remove", day="2026-11-25"))
+#+        self.store.link(added["id"], 1, "V1", "linked", day=DAY)
+#+        self.assert_code("conflict", lambda: self.store.remove(added["id"], 1, "stale"))
+#+        self.assertEqual(self.store.entries(DAY)[0]["revision"], 2)
+#+
+#+    def test_two_connections_cannot_overwrite_same_expected_revision(self):
+#+        entry = self.store.add(DAY, values(), "initial")
+#+        barrier = threading.Barrier(2)
+#+
+#+        def writer(number):
+#+            store = DailyStore(self.path)
+#+            barrier.wait(timeout=5)
+#+            try:
+#+                return store.update(entry["id"], 1, values(amount=str(number)), "writer-" + str(number))["revision"]
+#+            except DailyStoreError as problem:
+#+                return problem.code
+#+
+#+        with ThreadPoolExecutor(max_workers=2) as workers:
+#+            results = list(workers.map(writer, (1, 2)))
+#+        self.assertCountEqual(results, [2, "conflict"])
+#+        self.assertEqual(len(self.store.history(entry["id"])), 2)
+#+
+#+    def test_simultaneous_same_create_retry_commits_one_entry(self):
+#+        barrier = threading.Barrier(2)
+#+
+#+        def writer(_):
+#+            store = DailyStore(self.path)
+#+            barrier.wait(timeout=5)
+#+            return store.add(DAY, values(), "shared-create")
+#+
+#+        with ThreadPoolExecutor(max_workers=2) as workers:
+#+            results = list(workers.map(writer, (1, 2)))
+#+        self.assertEqual(results[0], results[1])
+#+        self.assertEqual(len(self.store.entries(DAY)), 1)
+#+
+#+    def test_lock_timeout_has_safe_retry_message(self):
+#+        store = DailyStore(self.path, timeout=0.01)
+#+        connection = sqlite3.connect(self.path, isolation_level=None)
+#+        self.addCleanup(connection.close)
+#+        connection.execute("BEGIN IMMEDIATE")
+#+        problem = self.assert_code("busy", lambda: store.add(DAY, values(), "retry-after-lock"))
+#+        self.assertNotIn(str(self.path), str(problem))
+#+        connection.rollback()
+#+        self.assertEqual(store.add(DAY, values(), "retry-after-lock")["revision"], 1)
+#+
+#+    def test_wal_is_not_enabled_and_wrong_database_is_preserved(self):
+#+        with sqlite3.connect(self.path) as connection:
+#+            self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "delete")
+#+        foreign = self.path.parent / "pricing.sqlite"
+#+        with sqlite3.connect(foreign) as connection:
+#+            connection.execute("CREATE TABLE request (id TEXT PRIMARY KEY)")
+#+        self.assert_code("configuration", lambda: DailyStore(foreign))
+#+        with sqlite3.connect(foreign) as connection:
+#+            names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+#+        self.assertEqual(names, {"request"})
+#+
+#+    def test_existing_wal_database_is_rejected_without_reconfiguration(self):
+#+        wal = self.path.parent / "wal.sqlite"
+#+        with sqlite3.connect(wal) as connection:
+#+            connection.execute("PRAGMA journal_mode=WAL")
+#+        self.assert_code("configuration", lambda: DailyStore(wal))
+#+        with sqlite3.connect(wal) as connection:
+#+            self.assertEqual(connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+#+
+#+    def test_missing_database_is_not_silently_recreated_on_read(self):
+#+        self.path.unlink()
+#+        self.assert_code("storage", lambda: self.store.load(DAY))
+#+        self.assertFalse(self.path.exists())
+#+
+#+    def test_windows_unc_uri_has_empty_authority_and_escaped_spaces(self):
+#+        unc = PureWindowsPath(r"\\server\share\Daily Data\manual records.sqlite")
+#+        self.assertEqual(_sqlite_uri(unc), "file:////server/share/Daily%20Data/manual%20records.sqlite?mode=rw")
+#+        local = PureWindowsPath(r"C:\Daily Data\manual.sqlite")
+#+        self.assertEqual(_sqlite_uri(local), "file:///C:/Daily%20Data/manual.sqlite?mode=rw")
+#+
+#+    def test_blank_manual_form_and_invalid_input_fail_without_a_write(self):
+#+        for body in ({}, {"event_type": "win"}, values(product_type="  "), values(event_type=[]), values(amount=1.5), values(currency="CHFF")):
+#+            with self.subTest(body=body):
+#+                self.assert_code("validation", lambda: self.store.add(DAY, body, "invalid"))
+#+        self.assert_code("validation", lambda: self.store.load(None))
+#+        self.assertEqual(self.store.days(), [])
+#+
+#+    def test_missing_sld_confirmation_requires_positive_final_amount_and_currency(self):
+#+        for body in (values("issuance", confirmed_missing=True),
+#+                     values("issuance", amount="0", confirmed_missing=True),
+#+                     values("issuance", amount="12", currency="", confirmed_missing=True)):
+#+            self.assert_code("validation", lambda: self.store.add(DAY, body, "invalid-confirmation"))
+#+        pending = self.store.add(DAY, values("issuance"), "pending")
+#+        self.assert_code("validation", lambda: self.store.link(pending["id"], 1, None, "confirm", confirmed_missing=True))
+#+        self.assertEqual(self.store.entries(DAY)[0]["revision"], 1)
+#+
+#+    def test_source_validation_prevents_ambiguous_or_invalid_publication(self):
+#+        invalid = [source(trade(), trade()), source(trade(chf="NaN")), source(trade(flow="other"))]
+#+        invalid.append({**source(), "requests": {"eflow": True, "voiceflow": 0, "unknown": 0}})
+#+        for item in invalid:
+#+            self.assert_code("validation", lambda: self.store.capture(item, "invalid-source"))
+#+        self.assertEqual(self.store.days(), [])
+#+
+#+    def test_saved_source_integrity_failure_is_visible(self):
+#+        self.store.capture(source(), "capture")
+#+        with sqlite3.connect(self.path) as connection:
+#+            connection.execute("UPDATE daily_snapshots SET source_json='{}'")
+#+        self.assert_code("storage", lambda: self.store.load(DAY))
+#+
+#+    def test_linked_subscription_counts_once_and_moves_detail(self):
+#+        added = self.store.add(DAY, values("issuance", trade_id="V1"), "sub")
+#+        report = self.store.load(DAY, source=source(trade()))
+#+        self.assertEqual(report["voiceflow"]["trade_count"], 1)
+#+        self.assertEqual(report["voiceflow"]["manual_trade_count"], 0)
+#+        self.assertEqual(report["voiceflow_trades"], [])
+#+        self.assertEqual(report["subscription_issuances"][0]["manual_id"], added["id"])
+#+        self.assertEqual(report["subscription_issuances"][0]["amount"], "1000000")
+#+        self.assertEqual(report["voice_options"][0]["value"], "V1")
+#+        self.assertFalse(report["voiceflow"]["provisional"])
+#+
+#+    def test_unlinked_issuance_is_visible_but_needs_confirmation_before_counting(self):
+#+        added = self.store.add(DAY, values("issuance", amount="1000000"), "sub")
+#+        first = self.store.load(DAY, source=source(trade()))
+#+        self.assertEqual(first["voiceflow"]["trade_count"], 1)
+#+        self.assertFalse(first["reconciliation"][0]["counted"])
+#+        self.store.link(added["id"], 1, None, "confirm", confirmed_missing=True)
+#+        second = self.store.load(DAY, source=source(trade()))
+#+        self.assertEqual(second["voiceflow"]["trade_count"], 2)
+#+        self.assertTrue(second["voiceflow"]["provisional"])
+#+        self.assertEqual(second["reconciliation"][0]["candidate_trade_ids"], ["V1"])
+#+        self.assertTrue(any("possible duplicate" in warning for warning in second["warnings"]))
+#+        self.store.link(added["id"], 2, "V1", "resolve")
+#+        final = self.store.load(DAY, source=source(trade()))
+#+        self.assertEqual(final["voiceflow"]["trade_count"], 1)
+#+        self.assertEqual(final["reconciliation"][0]["status"], "linked")
+#+
+#+    def test_confirmed_missing_reference_resolves_when_sld_row_arrives(self):
+#+        self.store.add(DAY, values("issuance", amount="1000000", trade_id="V1", confirmed_missing=True), "sub")
+#+        before = self.store.load(DAY, source=source())
+#+        after = self.store.load(DAY, source=source(trade()))
+#+        self.assertEqual(before["voiceflow"]["trade_count"], 1)
+#+        self.assertEqual(after["voiceflow"]["trade_count"], 1)
+#+        self.assertEqual(after["voiceflow"]["manual_trade_count"], 0)
+#+        self.assertEqual(after["reconciliation"][0]["status"], "linked")
+#+
+#+    def test_same_trade_cannot_be_linked_twice_and_removal_releases_link(self):
+#+        first = self.store.add(DAY, values("issuance", trade_id="V1"), "one")
+#+        second = self.store.add(DAY, values("issuance"), "two")
+#+        self.assert_code("conflict", lambda: self.store.link(second["id"], 1, "V1", "duplicate"))
+#+        self.store.remove(first["id"], 1, "remove")
+#+        self.store.link(second["id"], 1, "V1", "duplicate")
+#+        self.assertEqual(len(self.store.load(DAY, source=source(trade()))["subscription_issuances"]), 1)
+#+
+#+    def test_wrong_flow_reference_does_not_add_a_voice_trade(self):
+#+        self.store.add(DAY, values("issuance", amount="1000000", trade_id="E1", confirmed_missing=True), "sub")
+#+        report = self.store.load(DAY, source=source(trade("E1", "eflow")))
+#+        self.assertEqual(report["voiceflow"]["trade_count"], 0)
+#+        self.assertEqual(report["reconciliation"][0]["status"], "wrong_flow")
+#+        self.assertTrue(report["voiceflow"]["provisional"])
+#+
+#+    def test_wins_and_prehedges_do_not_add_trade_or_financial_totals(self):
+#+        self.store.add(DAY, values(), "win")
+#+        self.store.add(DAY, values("pre_hedge", amount="999999"), "pre")
+#+        report = self.store.load(DAY, source=source())
+#+        self.assertEqual(report["voiceflow"]["trade_count"], 0)
+#+        self.assertEqual(report["eflow"]["volume_chf"], "0")
+#+        self.assertEqual(len(report["subscription_wins"]), 1)
+#+        self.assertEqual(len(report["pre_hedges"]), 1)
+#+
+#+    def test_threshold_missing_fx_and_unknown_flow_preserve_visible_rows(self):
+#+        report = self.store.load(DAY, source=source(
+#+            trade("E1", "eflow", chf="500000"), trade("E2", "eflow", chf="500000.0001"),
+#+            trade("E3", "eflow", chf=None, pnl_chf=None), trade("U1", "unknown")))
+#+        self.assertEqual([row["id"] for row in report["eflow_trades"]], ["E2"])
+#+        self.assertEqual([row["id"] for row in report["eflow_unresolved_trades"]], ["E3"])
+#+        self.assertEqual([row["id"] for row in report["unknown_trades"]], ["U1"])
+#+        self.assertIsNone(report["eflow"]["volume_chf"])
+#+        self.assertIsNone(report["eflow"]["pnl_chf"])
+#+        self.assertEqual(report["eflow"]["trade_count"], 3)
+#+
+#+    def test_exact_eflow_totals_and_detached_live_input(self):
+#+        original = source(trade("E1", "eflow", chf="9007199254740993.0000000000123", pnl_chf="-0.01"),
+#+                          trade("E2", "eflow", chf="0.0000000000007", pnl_chf="0.02"))
+#+        unchanged = deepcopy(original)
+#+        report = self.store.load(DAY, source=original)
+#+        self.assertEqual(report["eflow"]["volume_chf"], "9007199254740993.0000000000130")
+#+        self.assertEqual(report["eflow"]["pnl_chf"], "0.01")
+#+        self.assertEqual(original, unchanged)
+#+        original["trades"][0]["chf"] = "1"
+#+        self.assertEqual(report["eflow_trades"][0]["chf"], "9007199254740993.0000000000123")
+#+
+#+    def test_reconstructed_label_uses_zurich_read_day_and_survives_capture(self):
+#+        later = source(read_at="2026-11-26T23:30:00+00:00")
+#+        self.store.capture(later, "capture")
+#+        report = DailyStore(self.path).load(DAY)
+#+        self.assertTrue(report["reconstructed"])
+#+        self.assertEqual(report["read_date_zurich"], "2026-11-27")
+#+        self.assertIn("reconstructed", report["capture_label"])
+#+        self.assertEqual(report["read_at"], later["read_at"])
+#+
+#+    def test_incomplete_trade_coverage_preserves_requests_rows_and_reason(self):
+#+        observed = {**source(trade("E1", "eflow"), trade()),
+#+                    "coverage": {"trades_complete": False},
+#+                    "unresolved_trades": [{"product_id": "FICTIONAL-ORPHAN", "reason": "RFQ link unavailable"}],
+#+                    "warnings": ["Fictional source orphan requires reconciliation."]}
+#+        report = self.store.load(DAY, source=observed)
+#+        self.assertEqual(report["requests"]["eflow"], 5)
+#+        self.assertEqual(report["eflow"]["request_count"], 5)
+#+        self.assertIsNone(report["eflow"]["trade_count"])
+#+        self.assertIsNone(report["voiceflow"]["trade_count"])
+#+        self.assertIsNone(report["eflow"]["volume_chf"])
+#+        self.assertIsNone(report["eflow"]["pnl_chf"])
+#+        self.assertEqual(len(report["eflow_trades"]), 1)
+#+        self.assertEqual(len(report["voiceflow_trades"]), 1)
+#+        self.assertEqual(report["unresolved_trades"], observed["unresolved_trades"])
+#+        self.assertIn(observed["warnings"][0], report["warnings"])
+#+        self.assertFalse(report["trade_coverage_complete"])
+#+
+#+
+#+if __name__ == "__main__":
+#+    unittest.main()
+# FILE {"kind": "app", "name": "tests/test_daily_source.py", "new_lf": true}
+#+"""Fictional daily source, SQL-cohort and financial regression checks."""
+#+from datetime import date, datetime, timezone
+#+from decimal import Decimal
+#+import json
+#+from pathlib import Path

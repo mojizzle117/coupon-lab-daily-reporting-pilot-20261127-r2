@@ -1,0 +1,441 @@
+#=        spec = importlib.util.spec_from_file_location("coupon_transfer", ROOT / "build_transfer.py")
+#=        module = importlib.util.module_from_spec(spec)
+#=        spec.loader.exec_module(module)
+#=        self.assertTrue(module.is_unconfigured_connection((ROOT / "office_connection.py").read_bytes()),
+#=                        "Release acceptance requires a clean home placeholder; never package an office connection.")
+#=        live_manifest = ROOT / "RELEASE_MANIFEST.json"
+#=        before_manifest = live_manifest.read_bytes() if live_manifest.exists() else None
+#=        with tempfile.TemporaryDirectory() as folder:
+#=            base = Path(folder)
+#=            # Build from a disposable copy, so verification never rewrites the
+#=            # live source RELEASE_MANIFEST.json or includes input/run folders.
+#=            release = base / "release"
+#=            shutil.copytree(ROOT, release, symlinks=True, ignore=shutil.ignore_patterns(
+#=                "__pycache__", "inputs", "outputs", ".venv", ".pytest_cache"))
+#=            installer = module.build(base / "transfer", root=release)
+#=            self.assertEqual(live_manifest.read_bytes() if live_manifest.exists() else None, before_manifest,
+#=                             "Complete-transfer acceptance must never rewrite the live source manifest")
+#=            target = base / "installed path with spaces"
+#=            command = [sys.executable, str(installer), "--destination", str(target)]
+#=            result = subprocess.run(command, cwd=base, capture_output=True, text=True)
+#=            self.assertEqual(result.returncode, 0, result.stderr)
+#=            self.assertTrue((target / "coupon_lab/ui/assets/coupon-lab-v1.png").is_file())
+#=            self.assertTrue((target / "00_START_WITH_GPT.txt").is_file())
+#=            self.assertFalse(any("outputs" in name.relative_to(release).parts for name in module.payload_files(release)))
+#=            again = subprocess.run(command, cwd=base, capture_output=True, text=True)
+#=            self.assertNotEqual(again.returncode, 0)
+#=            self.assertIn("nothing was overwritten", again.stderr)
+#=            result = subprocess.run([sys.executable, str(target / "run_coupon_lab.py"), "support"], cwd=base,
+# COPY BLOCK 11
+#=                                    capture_output=True, text=True)
+#=            self.assertEqual(result.returncode, 0, result.stderr)
+#=            self.assertNotIn("source.csv", result.stdout)
+#=            self.assertNotIn("password", result.stdout.lower())
+#=            # The exact installed bundle must run its own portable tests without
+#=            # importing home fixtures. release_checks.py is deliberately excluded
+#=            # from selftest discovery, so this does not recurse into packaging.
+#=            installed = subprocess.run([sys.executable, str(target / "run_coupon_lab.py"), "selftest"],
+#=                                       cwd=base, capture_output=True, text=True, timeout=60)
+#=            self.assertEqual(installed.returncode, 0, installed.stdout + installed.stderr)
+#=        self.assertEqual(live_manifest.read_bytes() if live_manifest.exists() else None, before_manifest)
+#=
+#=
+#=class OpportunityReferenceAcceptanceChecks(unittest.TestCase):
+#=    def test_shipped_opportunity_candidates_remain_pending(self):
+#=        from coupon_lab.normalize import validate_references
+#=        rows = read('opportunity_reason_rules.csv')
+#=        checked = validate_references({"references": {"opportunity_rules": rows}})["opportunity_rules"]
+#=        self.assertEqual(len(checked), 66)
+#=        self.assertTrue(all(not row["Reviewed"] for row in checked))
+#=
+#=
+#=if __name__ == "__main__":
+#=    unittest.main()
+# FILE {"kind": "app", "name": "tests/test_launcher.py", "new_lf": true, "old_lf": true}
+#="""Exercise the real CLI/stages with invented files and a mock Oracle source.
+#=
+#=This connects no office system. It checks orchestration, atomic publication,
+#=first-run diagnostics and privacy-safe failure handling end to end.
+#="""
+#=import contextlib
+#=import importlib.util
+#=import io
+#=import json
+#=from pathlib import Path
+#=import sys
+#=import unittest
+#=from unittest.mock import patch
+#=
+#=ROOT = Path(__file__).resolve().parents[1]
+#=sys.path.insert(0, str(ROOT))
+#=sys.path.insert(0, str(ROOT / "tests"))
+#=import run_coupon_lab as run
+#=import test_pipeline as fixtures
+#=from coupon_lab import sources
+#=from coupon_lab.storage import load_json, RunError
+#=
+#=
+#=class LauncherTests(unittest.TestCase):
+#=    def setUp(self):
+#=        self.fixture = fixtures.OfficePipelineTests("test_exact_source_to_six_rfq_snapshot_and_kpis")
+#=        self.fixture.setUp()
+#=        self.addCleanup(self.fixture.doCleanups)
+#=        self.cfg = self.fixture.cfg
+#=        self.original_load = sources.load_sources
+#=
+#=    def mock_load(self, cfg):
+#=        return self.original_load(cfg, connection_factory=lambda: fixtures.MockConnection(self.fixture.tables))
+#=
+#=    def invoke(self, args):
+#=        output, error = io.StringIO(), io.StringIO()
+#=        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(error):
+#=            code = run.main(args)
+#=        return code, output.getvalue(), error.getvalue()
+#+
+#+    def test_latest_uses_published_run_even_after_input_changes(self):
+#+        with patch.object(sources, "load_sources", side_effect=self.mock_load):
+#+            _, directory = run.prepare(self.cfg)
+#+        mapping = self.fixture.root / 'reference/main_reason_mappings.csv'
+#+        mapping.write_bytes(mapping.read_bytes() + b'\n')
+#+        with patch.object(run, 'prepare') as prepare, patch.object(run, 'probe_port'), patch.object(run, 'start_server') as start:
+#+            status, _, error = self.invoke(['start', '--latest', '--settings', str(self.fixture.path)])
+#+        self.assertEqual(status, 0, error)
+#+        self.assertEqual(start.call_args.args[1]['run_id'], directory.name)
+#+        prepare.assert_not_called()
+#+
+#+    def test_broken_latest_does_not_prepare_or_launch(self):
+#+        output = self.fixture.root / 'outputs'
+#+        output.mkdir(exist_ok=True)
+#+        for pointer in [None, {'run': '../elsewhere'}, {'run': 'incomplete_run'}]:
+#+            if pointer is not None:
+#+                (output / 'latest.json').write_text(json.dumps(pointer))
+#+            with patch.object(run, 'prepare') as prepare, patch.object(run, 'probe_port'), patch.object(run, 'start_server') as start:
+#+                status, _, error = self.invoke(['start', '--latest', '--settings', str(self.fixture.path)])
+#+            self.assertEqual(status, 1)
+#+            self.assertIn(str(output), error)
+#+            prepare.assert_not_called()
+#+            start.assert_not_called()
+#=
+#=    def test_prepare_and_reopen_exact_completed_run(self):
+#=        with patch.object(sources, "load_sources", side_effect=self.mock_load):
+#=            snapshot, directory = run.prepare(self.cfg)
+#=        self.assertEqual(len(snapshot["rows"]), 6)
+#=        self.assertEqual(directory.parent.resolve(), (self.fixture.root / "outputs").resolve())
+#=        manifest = load_json(directory / "manifest.json")
+#=        self.assertEqual(manifest["status"], "complete")
+#=        self.assertGreater(manifest["independent_metric_checks"], 0)
+#=        with patch.object(sources, "load_sources") as connection:
+#=            code, output, error = self.invoke(["reconcile", "--settings", str(self.fixture.path), "--run", str(directory)])
+#=        connection.assert_not_called()
+#=        self.assertEqual(code, 0, error)
+#=        self.assertIn("no SLD refresh", output)
+#=        self.assertIn("does not mark", output)
+#=
+#=    def test_mapping_review_reuses_saved_run_without_database_or_activation(self):
+#=        self.fixture.tables["validation"]=[{"ID":701,"PRODUCT_ID":102,"VALIDATION_CODE":"SYNTH_UNSEEN_CODE"}]
+#=        with patch.object(sources,"load_sources",side_effect=self.mock_load):
+#=            _,directory=run.prepare(self.cfg)
+#=        original=(self.fixture.root/"reference/main_reason_mappings.csv").read_bytes()
+#=        with patch.object(sources,"load_sources") as database:
+#=            code,output,error=self.invoke(["mapping-review","--settings",str(self.fixture.path),"--run",str(directory)])
+#=        database.assert_not_called()
+#=        self.assertEqual(code,0,error)
+#=        self.assertIn("No mapping was activated",output)
+#=        files=list((self.fixture.root/"outputs").glob("reason-mapping-review-*.csv"))
+#=        self.assertEqual(len(files),1)
+#=        self.assertIn("SYNTH_UNSEEN_CODE",files[0].read_text())
+#=        self.assertNotIn("SYNTH_UNSEEN_CODE",output)
+#=        self.assertEqual((self.fixture.root/"reference/main_reason_mappings.csv").read_bytes(),original)
+#=
+#=    def test_mapping_review_requires_saved_run_and_never_extracts(self):
+#=        with patch.object(sources,"load_sources") as database:
+#=            code,output,error=self.invoke(["mapping-review","--settings",str(self.fixture.path)])
+#=        database.assert_not_called()
+#=        self.assertEqual(code,1)
+#=        self.assertIn("Supply --run",error)
+#=
+#=    def test_mapping_edit_requires_new_preparation_instead_of_reusing_stale_run(self):
+#=        with patch.object(sources,"load_sources",side_effect=self.mock_load):
+#=            _,directory=run.prepare(self.cfg)
+#=        mapping=self.fixture.root/'reference/main_reason_mappings.csv'
+#=        mapping.write_bytes(mapping.read_bytes()+b'\n')
+#=        with patch.object(sources,"load_sources") as database:
+#=            code,output,error=self.invoke(['mapping-review','--settings',str(self.fixture.path),'--run',str(directory)])
+#=        database.assert_not_called()
+#=        self.assertEqual(code,1)
+#=        self.assertIn('freshness',error.lower())
+#=        self.assertTrue((directory/'snapshot.json').is_file())
+#=
+#=    def test_real_feedback_and_reference_diagnostics_do_not_connect(self):
+#=        for stage in ("feedback", "references"):
+#=            with self.subTest(stage=stage), patch.object(sources, "load_sources") as connection:
+#=                code, output, error = self.invoke(["prepare", "--settings", str(self.fixture.path), "--step", stage])
+#=            connection.assert_not_called()
+#=            self.assertEqual(code, 0, error)
+#=            self.assertIn("No analytical run was published", output)
+#=            self.assertFalse((self.fixture.root / "outputs").exists())
+#=
+#=    def test_sld_classification_and_metrics_diagnostics_stop_without_publish(self):
+#=        for stage in ("sld", "classification", "metrics"):
+#=            with self.subTest(stage=stage), patch.object(sources, "load_sources", side_effect=self.mock_load):
+#=                code, output, error = self.invoke(["check", "--settings", str(self.fixture.path), "--step", stage])
+#=            self.assertEqual(code, 0, error)
+#=            self.assertIn("No analytical run was published", output)
+#=            self.assertNotIn("SYNTH SW", output)
+#=            self.assertNotIn("SELECT ", output)
+#=
+#=    def test_changed_file_inventory_rejected(self):
+#=        def changed(cfg):
+#=            result = self.mock_load(cfg)
+#=            (self.fixture.root / "inputs/platform_a/new.csv").write_text("newly exported synthetic file")
+#=            return result
+#=        with patch.object(sources, "load_sources", side_effect=changed), self.assertRaises(RunError):
+#=            run.prepare(self.cfg)
+#=        self.assertFalse((self.fixture.root / "outputs").exists())
+#=
+#=    def test_different_settings_cannot_reopen_saved_run(self):
+#=        with patch.object(sources, "load_sources", side_effect=self.mock_load):
+#=            snapshot, directory = run.prepare(self.cfg)
+#=        other = self.fixture.root / "other-settings.json"
+#=        other.write_text(self.fixture.path.read_text())
+#=        code, output, error = self.invoke(["reconcile", "--settings", str(other), "--run", str(directory)])
+#=        self.assertEqual(code, 1)
+#=        self.assertIn("not part of this run", error)
+#=
+#=    def test_unexpected_driver_payload_is_suppressed(self):
+#=        with patch.object(sources, "load_sources", side_effect=RuntimeError("PRIVATE SECRET sql credential record")):
+#=            code, output, error = self.invoke(["prepare", "--settings", str(self.fixture.path)])
+#=        self.assertEqual(code, 1)
+#=        self.assertNotIn("PRIVATE SECRET", output + error)
+#=        self.assertIn("raw exception details were suppressed", error)
+#=
+#=    def test_port_is_checked_before_any_source_read(self):
+#=        with patch.object(run, "probe_port", side_effect=RunError("Stage: startup. port occupied")), patch.object(sources, "load_sources") as load:
+#=            code, output, error = self.invoke(["start", "--settings", str(self.fixture.path), "--no-browser"])
+#=        load.assert_not_called()
+#=        self.assertEqual(code, 1)
+#=
+#=    def test_demo_uses_configured_port_before_loading_references(self):
+#=        settings=json.loads(self.fixture.path.read_text());settings['app']['port']=8059
+#=        self.fixture.path.write_text(json.dumps(settings))
+#=        with patch.object(run,'probe_port',side_effect=RunError('Stage: startup. synthetic occupied port')) as probe, patch.object(sources,'load_references') as references:
+#=            code,output,error=self.invoke(['demo','--settings',str(self.fixture.path),'--no-browser'])
+#=        self.assertEqual(code,1)
+#=        probe.assert_called_once_with(8059)
+#=        references.assert_not_called()
+#=
+#=    def test_original_excel_headers_and_native_cells(self):
+#=        from openpyxl import Workbook
+#=        from coupon_lab.config import load_settings
+#=        from coupon_lab.normalize import prepare_feedback
+#=        original = json.loads(self.fixture.path.read_text())
+#=        for role, rows in (("platform_a", self.fixture.platform_a), ("platform_b", self.fixture.deri)):
+#=            spec = original["feedback"][role]
+#=            spec["patterns"] = ["*.xlsx"]
+#=            spec["sheet"] = "Master" if role == "platform_a" else "Original"
+#=            workbook = Workbook()
+#=            sheet = workbook.active
+#=            sheet.title = spec["sheet"]
+#=            sheet.append(list(rows[0]))
+#=            for row in rows:
+#=                sheet.append(list(row.values()))
+#=            workbook.save(self.fixture.root / "inputs" / role / "synthetic.xlsx")
+#=        self.fixture.path.write_text(json.dumps(original))
+#=        cfg = load_settings(self.fixture.path)
+#=        bundle = sources.load_feedback(cfg)
+#=        rows, quality, periods = prepare_feedback(bundle, cfg)
+#=        self.assertEqual(len(rows), 6)
+#=        self.assertEqual(periods, {"PLATFORM_A": ["2026-09"], "PLATFORM_B": ["2026-09"]})
+#=
+#=
+#=if __name__ == "__main__":
+#=    unittest.main()
+# FILE {"kind": "app", "name": "tests/test_missed_views.py", "new_lf": true, "old_lf": true}
+#="""Independent synthetic acceptance for the single Missed Opportunities page.
+#=
+#=Run from the application folder with standard unittest discovery. These cases
+#=exercise the visible RFQ sets, scoped menu actions, constituent attribution,
+#=complete pagination metadata and privacy boundary without office data/network.
+#="""
+#=from copy import deepcopy
+#=from decimal import Decimal
+#=import json
+#=from pathlib import Path
+#=import sys
+#=import unittest
+#=
+#=from dash import Dash, dcc, html
+#=from dash._utils import to_json
+#=
+#=ROOT = Path(__file__).resolve().parents[1]
+#=sys.path.insert(0, str(ROOT))
+#=from coupon_lab import missed_analysis as engine
+#=from coupon_lab.ui import missed_views as view
+#=
+#=
+#=def fixture():
+#=    def support(name, status='Current snapshot match', **flags):
+#=        return {'symbol': name, 'status': status,
+#=                **{'ISSUER': 1, 'PROVIDER_A': 1, 'PROVIDER_B': 0, 'PROVIDER_C': 0}, **flags}
+#=    def row(name, amount, **changes):
+#=        result = {'platform': 'PLATFORM_A', 'month': '2026-09', 'rfq_id': name,
+#=            'notional_chf': Decimal(amount) if amount is not None else None,
+#=            'qualifying_quote': False, 'won': False, 'currency': 'CHF', 'is_fx': False,
+#=            'product_type': 'Barrier Reverse Convertible', 'common_product_type': 'Barrier Reverse Convertible',
+#=            'callability': 'NC', 'barrier': 'Yes', 'capped': 'No', 'region': 'CH',
+#=            'underlying_structure': 'Single', 'underlyings': ['GOOD SW'], 'underlying_ids': ['GOOD SW'],
+#=            'admin_support': [support('GOOD SW')], 'observations': [], 'providers': [],
+#=            'received': True, 'product_id': 'P-' + name, 'sld_request_id': 'R-' + name,
+#=            'product_link_valid': True, 'timestamp': '2026-09-15T12:00:00+02:00',
+#=            'request_timestamp': '2026-09-15T12:01:00+02:00', 'raw_feedback': {}, 'raw_sld': {}}
+#=        result.update(changes)
+#=        return result
+#=    def observation(code, message, **extra):
+#=        return {'source': 'validation', 'code': code, 'message': message, **extra}
+#=    config = row('config', '100', underlyings=['BAD SW', 'GOOD SW'],
+#=        underlying_ids=['BAD SW', 'GOOD SW'], underlying_structure='Multi',
+#=        admin_support=[support('BAD SW', 'Absent from current admin'), support('GOOD SW')],
+#=        observations=[observation('EXPECTED_LIFETIME_CALCULATION_FAILED', 'Missing configuration example')])
+#=    hedge = row('hedge', '200', observations=[observation('FAILED_TO_HEDGE', 'Synthetic hedge issue')],
+#=        providers=[{'provider': 'PROVIDER_A', 'part_type': 'PUT', 'detail_id': 'H-1', 'asked': True,
+#=                    'received': False, 'quote_type': 'INDICATIVE', 'timing': 'Unknown',
+#=                    'trade_price': 'NUMERIC_QUOTE_MUST_STAY_HIDDEN',
+#=                    'strike_relative': 'NUMERIC_STRIKE_MUST_STAY_HIDDEN',
+#=                    'errors': [{'VALIDATION_CODE': 'SYNTHETIC_PROVIDER_ERROR'}]}])
+#=    currency = row('currency', '300', currency='JPY', received=False, product_id=None,
+#=                   sld_request_id=None, product_link_valid=False, request_timestamp=None)
+#=    message = row('message', '400', observations=[
+#=        observation('INVALID_PREMIUM', '<script>synthetic message</script>'),
+#=        observation('MIN_STRIKE_VIOLATED', '<script>synthetic message</script>')])
+#=    previous = deepcopy(config)
+#=    previous.update(rfq_id='previous', month='2026-08', notional_chf=Decimal(50),
+#=                    product_id='P-previous', sld_request_id='R-previous')
+#=    unknown = row('unknown', '500', qualifying_quote=None)
+#=    snapshot = {'mode': 'demo', 'rows': [config, hedge, currency, message, previous, unknown],
+#=        'months': ['2026-08', '2026-09'], 'generated_at': '2026-10-01T08:00:00+02:00',
+#=        'ticket_size_bands': [100000, 500000, 1000000],
+#=        'source_coverage': {role: {'complete': True} for role in
+#=            ('requests', 'products', 'hedges', 'validation', 'indicative', 'provider_validation', 'admin')}}
+#=    snapshot['source_coverage']['platform_months'] = {'PLATFORM_A': ['2026-08', '2026-09'], 'PLATFORM_B': []}
+#=    return snapshot, engine.build_index(snapshot)
+#=
+#=
+#=def properties(node, result=None):
+#=    result = {} if result is None else result
+#=    if isinstance(node, dict):
+#=        props = node.get('props', {})
+#=        identifier = props.get('id')
+#=        if isinstance(identifier, str):
+#=            if identifier in result: raise AssertionError('Repeated layout identifier: ' + identifier)
+# COPY BLOCK 12
+#=            result[identifier] = props
+#=        for value in node.values():
+#=            if isinstance(value, (list, dict)): properties(value, result)
+#=    elif isinstance(node, list):
+#=        for item in node: properties(item, result)
+#=    return result
+#=
+#=
+#=def pattern_ids(node, result=None):
+#=    result = [] if result is None else result
+#=    if isinstance(node, dict):
+#=        identifier = node.get('props', {}).get('id')
+#=        if isinstance(identifier, dict): result.append(identifier)
+#=        for value in node.values():
+#=            if isinstance(value, (list, dict)): pattern_ids(value, result)
+#=    elif isinstance(node, list):
+#=        for item in node: pattern_ids(item, result)
+#=    return result
+#=
+#=
+#=def metric_cards(node):
+#=    found = {}
+#=    def visit(item):
+#=        if isinstance(item, dict):
+#=            props = item.get('props', {})
+#=            if 'data-metric' in props: found[props['data-metric']] = props
+#=            for child in item.values(): visit(child)
+#=        elif isinstance(item, list):
+#=            for child in item: visit(child)
+#=    visit(json.loads(to_json(node)))
+#=    return found
+#=
+#=
+#=class MissedViewTests(unittest.TestCase):
+#=    def setUp(self):
+#=        self.snapshot, self.index = fixture()
+#=
+#=    def render(self, state=None, options=None, month='2026-09', population='all'):
+#=        return view.render(view.PAGE, self.snapshot, 'PLATFORM_A', month, population,
+#=                           {}, {'cases_open': True, **(state or {})}, options or {}, index=self.index)
+#=
+#=    def test_one_page_layout_has_stable_unique_controls_and_complete_native_paging(self):
+#=        props = properties(json.loads(to_json(view.layouts(self.snapshot, {}))))
+#=        self.assertIn('page-' + view.PAGE, props)
+#=        self.assertIn('missed-state', props)
+#=        self.assertTrue(all(name in props for name in view.CONTROL_DEFAULTS))
+#=        self.assertTrue(all(key.rsplit('.', 1)[0] in props for key in view.UPDATE_KEYS))
+#=        self.assertEqual(props['mm-case-table']['page_size'], 16)
+#=        self.assertEqual(props['mm-case-table']['sort_action'], 'custom')
+#=        self.assertEqual(props['mm-case-table']['page_action'], 'custom')
+#=        self.assertFalse(props['mm-rfq-section']['open'])
+#=        self.assertNotIn('mm-summary', props)
+#=        self.assertNotIn('mm-case-status', props)
+#=        self.assertNotIn('mm-detail-menu', props)
+#=        self.assertNotIn('mm-hedge-detail-source', props)
+#=        self.assertNotIn('provider_validation', {item['value'] for item in props['mm-dimension']['options']})
+#=        self.assertNotIn('mm-clear', props)
+#=        self.assertNotIn('mm-active', props)
+#=        self.assertEqual(props['mm-kpis']['className'], 'mm-scorecard')
+#=        self.assertIn('mm-reason-dropdown', props)
+#=        self.assertNotIn('assessment', [column['id'] for column in props['mm-case-table']['columns']])
+#=        self.assertFalse(any(name.startswith(('mo-', 'ra-')) for name in props))
+#=        self.assertNotIn('Scenario', to_json(view.layouts(self.snapshot, {})))
+#=
+#=    def test_full_render_keys_and_default_known_missed_baseline(self):
+#=        result = self.render()
+#=        self.assertEqual(set(result), set(view.UPDATE_KEYS))
+#=        self.assertEqual({item['rfq'] for item in result['mm-case-table.data']},
+#=                         {'config', 'hedge', 'currency', 'message'})
+#=        self.assertEqual(len(metric_cards(result['mm-kpis.children'])), 6)
+#=        serialized = to_json(result['mm-kpis.children'])
+#=        self.assertIn('Share of baseline missed CHF', serialized)
+#=        self.assertIn('overall_missed_rate', serialized)
+#=        self.assertEqual(view.render('another-page', self.snapshot, 'PLATFORM_A', '2026-09', 'all', {}, {}, {}), {})
+#=
+#=    def test_selection_kpi_highlight_tracks_filter_intent_not_changed_numbers(self):
+#=        normal = self.render()
+#=        def groups(result):
+#=            return json.loads(to_json(result['mm-kpis.children']))
+#=        def selected_active(result):
+#=            current = groups(result)
+#=            self.assertNotIn('is-active', current[0]['props']['className'])
+#=            return 'is-active' in current[1]['props']['className'].split()
+#=        self.assertFalse(selected_active(normal))
+#=        reason = view.transition({}, 'reason', 'configuration', self.index)
+#=        self.assertTrue(selected_active(self.render(reason)))
+#=        token = engine.detail_id('configuration', engine.CONFIG_DETAILS['absent'])
+#=        detail = view.transition(reason, 'detail', token, self.index)
+#=        self.assertTrue(selected_active(self.render(detail)))
+#=        excluded = {'query': {'exclude_reasons': [engine.LIFETIME]}}
+#=        self.assertTrue(selected_active(self.render(excluded)))
+#=        # Both values already cover this complete fixture. The amounts do not
+#=        # change, but an explicit local filter must still signal selection.
+#=        analysis = self.render(options={'analysis_filters': {'currency': ['CHF', 'JPY']}})
+#=        self.assertTrue(selected_active(analysis))
+#=        self.assertEqual(to_json(metric_cards(normal['mm-kpis.children'])),
+#=                         to_json(metric_cards(analysis['mm-kpis.children'])))
+#=        # Include all is another selected intention whose result equals baseline.
+#=        bulk = view.transition({}, 'bulk', {'kind': 'reason', 'mode': 'include'}, self.index)
+#=        all_included = self.render(bulk)
+#=        self.assertTrue(selected_active(all_included))
+#=        self.assertEqual(to_json(metric_cards(normal['mm-kpis.children'])),
+#=                         to_json(metric_cards(all_included['mm-kpis.children'])))
+#=        # Changing the reference population alone must not make it a selection.
+#=        population_only = view.render(view.PAGE, self.snapshot, 'PLATFORM_A', '2026-09', 'all',
+#=            {'currency': ['CHF']}, {'cases_open': True}, {}, index=self.index)
+#=        self.assertFalse(selected_active(population_only))
+#=        self.assertFalse(selected_active(self.render(view.transition(detail, 'clear', None, self.index))))
+#=        self.assertFalse(selected_active(self.render({'_reset': 1, '_analysis_reset': 0})))
+#=
+#=    def test_filtered_charts_share_bright_selection_color_and_reset_restores_dark(self):

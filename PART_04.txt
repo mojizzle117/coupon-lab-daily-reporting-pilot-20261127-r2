@@ -1,0 +1,338 @@
+#=                field('Reporting month',dropdown('month',[{'label':month_label(x),'value':x} for x in reversed(months)],settings['default_month'])),
+#=                html.Div([
+#=                    html.Label('Reference population',htmlFor='population',id='population-label'),
+#=                    html.Div([
+#=                        dropdown('population',population_options,settings['default_population']),
+#=                        dropdown('comparison-population',[{'label':'All report RFQs · both platforms','value':'all'},{'label':'Common scope · four currencies, non-FX','value':'restricted'}],'all'),
+#=                        html.Div(dcc.Checklist(id='filter-received',value=[],
+#=                            options=[{'label':'Received RFQs only','value':'Yes'}],
+#=                            labelStyle={'display':'flex'},className='receipt-toggle'),
+#=                            title='Limit the reference population to report RFQs with a matched SLD request.')
+#=                    ],className='population-controls')
+#=                ],className='filter-field population-field'),
+#=                html.Details([html.Summary(id='filter-summary',children='Population filters'),html.Div(additional,className='filter-grid')],id='extra-filters',className='extra-filters'),
+#=                html.Button('Clear all filters',id='reset',n_clicks=0,className='button quiet',
+#=                            title='Clear attribute filters and local selections; keep platform, reporting month and population.'),
+#=              ],className='primary-filters'),
+#=              html.Div(id='scope',className='scope-line'),
+#=            ],className='filter-panel'),
+#=            *pages,
+#=            html.Div(id='readiness',className='readiness-strip'),
+#=            html.Div(id='print-filter-context',className='print-filter-context'),dcc.Store(id='print-status'),
+#=          ],id='report-page',className='report-page',style={'display':'none'}),
+#+          daily.layout(daily_service),
+#=          html.Div([html.H1('View not found'),dcc.Link('Return to Reports',href=app.get_relative_path('/'))],id='not-found',className='not-found',style={'display':'none'}),
+#=        ]),
+#=      ],className='cockpit-main'),
+#=    ],className='cockpit-shell')
+#=    app.layout=branding.present(app.layout,brand_registry)
+#=
+#=    app.clientside_callback(
+#=        """function(pathname, previousSection) {
+#=            const path = window.CouponLabReportPath(pathname);
+#=            const section = /^\\/rfq(?:\\/|$)/.test(path || '') ? 'rfq' : 'library';
+#=            if (previousSection == null || (section === 'rfq' && previousSection !== 'rfq')) {
+#=                const sign = document.getElementById('coupon-lab-sign');
+#=                if (sign && window.CouponLabMotion) sign.decode().catch(() => {}).then(() => {
+#=                    if (window.location.pathname === (pathname || '/')) window.CouponLabMotion.open(sign);
+#=                });
+#=            }
+#=            return section;
+#=        }""",Output('logo-route-state','data'),Input('location','pathname'),State('logo-route-state','data'))
+#=
+#=    app.clientside_callback(ClientsideFunction(namespace='couponLabScenario',function_name='measure'),
+#=        Output('whatif-measure-state','data'),Input('exp-whatif-state','data'),
+#=        State('exp-metric','value'),State('whatif-measure-state','data'))
+#=
+#=    app.clientside_callback(
+#=        """function(n){ if(!n) return window.dash_clientside.no_update;
+#=          if(window.CouponLabPrint) { return window.CouponLabPrint.exportView().then(function(){return n;}); }
+#=          window.print(); return n; }""",
+#=        Output('print-status','data'),Input('export-pdf','n_clicks'),prevent_initial_call=True)
+#=
+#=    route_outputs=[Output('home-page','style'),Output('report-page','style'),Output('not-found','style'),Output('report-navigation','style'),
+#=                   Output('breadcrumbs','children'),Output('view-title','children'),Output('view-position','children'),
+#=                   Output('platform','style'),Output('both-platforms','style'),Output('population','style'),Output('comparison-population','style')]
+#=    route_outputs += [Output('page-'+slug,'style') for slug,_,_ in VIEWS]+[Output('nav-'+slug,'className') for slug,_,group in VIEWS]
+#+    route_outputs += [Output('daily-page','style'),Output('nav-daily-reporting','className'),
+#+                      Output('daily-interval','disabled'),Output('selected-report-link','children'),Output('selected-report-link','href')]
+#=    @app.callback(route_outputs,Input('location','pathname'))
+#=    def route(path):
+#=        path=report_path(app,path)
+#-        slug=route_slug(path);home=path==''
+#+        slug=route_slug(path);home=path=='';is_daily=slug==daily.PAGE
+#=        current=next((item for item in VIEWS if item[0]==slug),None)
+#=        show,hide={}, {'display':'none'};comparison=slug=='platform-comparison'
+#=        crumbs=[dcc.Link('Reports',href=app.get_relative_path('/'))]
+#=        if current:crumbs += [html.Span('/'),html.Span(REPORT_TITLE),html.Span('/'),html.Strong(current[1])]
+#-        return [show if home else hide,show if current else hide,show if not home and not current else hide,show if current else hide,
+#+        if is_daily:crumbs += [html.Span('/'),html.Strong('Daily Reporting')]
+#+        return [show if home else hide,show if current else hide,show if not home and not current and not is_daily else hide,show if current or is_daily else hide,
+#=                crumbs,current[1] if current else '',current[2] if current else '',
+#=                hide if comparison else show,show if comparison else hide,hide if comparison else show,show if comparison else hide,
+#=                *[show if item[0]==slug else hide for item in VIEWS],
+#-                *['nav-link'+(' active' if item[0]==slug else '') for item in VIEWS]]
+#+                *['nav-link'+(' active' if item[0]==slug else '') for item in VIEWS],
+#+                show if is_daily else hide,'nav-link'+(' active' if is_daily else ''),not is_daily,
+#+                'Daily Reporting' if is_daily else REPORT_TITLE,
+#+                app.get_relative_path('/daily-reporting' if is_daily else '/rfq/general-overview')]
+#=
+#=    @app.callback(Output('population','options'),Output('population','disabled'),Input('platform','value'),Input('population','value'))
+#=    def population_options_for(platform,population):
+#=        return population_options,False
+#=
+#=    scope_controls=('platform','month','population','filter-received',*['filter-'+key for key,_ in FILTERS])
+#=    global_inputs=[Input(identifier,'value') for identifier in scope_controls]
+#=    control_defaults={**pv.CONTROLS,**mv.CONTROL_DEFAULTS,'comparison-population':'all'}
+#=    control_ids=tuple(control_defaults)
+#=    common_updates=('readiness.children','scope.children','scope.style','filter-summary.children','definitions.children',
+#=                    'print-filter-context.children')
+#=    # Return each chart's height with its figure in the same response. This
+#=    # keeps category bars readable even when custom browser sizing is absent.
+#=    chart_styles=tuple(identifier+'.style' for identifier in CHART_IDS)
+#=    update_keys=(*pv.UPDATE_KEYS,*mv.UPDATE_KEYS,*common_updates,*chart_styles)
+#=    definitions_panel = v.definitions(snapshot)
+#=
+#=    def render_view(slug,platform,month,population,filters,performance,reason_state,options,opportunity_state=None):
+#=        if slug in {'general-overview','category-performance','platform-comparison'}:
+#=            return pv.render(slug,snapshot,platform,month,population,filters,performance,options)
+#=        if slug=='missed-opportunity-analysis':
+#=            return mv.render(slug,snapshot,platform,month,population,filters,
+#=                             opportunity_state if opportunity_state is not None else reason_state,
+#=                             options,index=opportunity_index)
+#=        return {}
+#=
+#=    @app.callback([Output(*key.rsplit('.',1)) for key in update_keys],
+#=                  global_inputs+[Input('location','pathname'),Input('performance-state','data'),Input('missed-state','data'),
+#=                                 Input('exp-whatif-state','data'),Input('analysis-explorer-state','data'),
+#=                                 Input('analysis-missed-state','data')]+[Input(identifier,'value') for identifier in control_ids],
+#=                  running=[(Output('export-pdf','disabled'), True, False)])
+#=    def render(*args):
+#=        platform,month,population,receipt=args[:4];n=len(scope_controls)
+#=        filters=p.with_received_filter({key:values or [] for (key,_),values in zip(FILTERS,args[4:n])},receipt)
+#=        path,performance,opportunity_state,whatif_state,explorer_analysis,missed_analysis=args[n:n+6]
+#=        controls=dict(zip(control_ids,args[n+6:]));options={key.replace('-','_'):value for key,value in controls.items()}
+#=        opportunity_state=mv.for_breakdown_dimension(opportunity_state, controls['mm-dimension'])
+#=        reason_state=opportunity_state
+#=        options['exp_whatif_state']=whatif_state or {}
+#=        slug=route_slug(report_path(app,path))
+#+        if slug not in {item[0] for item in VIEWS}:
+#+            raise PreventUpdate
+#=        trigger=ctx.triggered_id
+#=        triggered={value for value in ctx.triggered_prop_ids.values() if isinstance(value,str)} or {None}
+#=        shared={None,'location',*scope_controls}
+#=        relevant={
+#=            'general-overview':{'history-metric','ov-dimension','ov-columns','ov-outcome-mode'},
+#=            'category-performance':{'performance-state','exp-whatif-state','analysis-explorer-state','exp-metric','exp-dimension'},
+#=            'platform-comparison':{'comparison-population','comparison-metric','comparison-dimension'},
+#=            mv.PAGE:{'missed-state','mm-metric','mm-dimension','analysis-missed-state'},
+#=        }
+#=        # Dash may coalesce several changed properties. An unrelated first
+#=        # trigger must never suppress a valid update for the active view.
+#=        if not triggered.intersection(shared|relevant.get(slug,set())):
+#=            raise PreventUpdate
+#=        # A measure change first resolves the existing history preview in the
+#=        # action callback, which always writes performance-state. Render from
+#=        # that resolved state once; do not also build an intermediate view.
+#=        # Coalesced state/scope/scenario events must still render normally.
+#=        if slug=='category-performance' and triggered=={'exp-metric'}:
+#=            raise PreventUpdate
+#=        # Scenario activation locks the measure to hit rate clientside. Wait
+#=        # for that measure's resolved performance-state rather than mounting
+#=        # hit-rate editors into an intermediate table for the prior measure.
+#=        if (slug=='category-performance' and triggered=={'exp-whatif-state'}
+#=                and (whatif_state or {}).get('enabled') is True
+#=                and controls.get('exp-metric')!='hit_rate'):
+#=            raise PreventUpdate
+#=        missed_full=shared|{'mm-metric','mm-dimension','analysis-missed-state'}
+#=        options['_missed_partial']=(opportunity_state or {}).get('_event') if 'missed-state' in triggered and not triggered.intersection(missed_full) else None
+#=        options['analysis_filters']=(explorer_analysis or {}) if slug=='category-performance' else (missed_analysis or {}) if slug==mv.PAGE else {}
+#=        # Scope changes may reach rendering before the interaction callback.
+#=        # Never briefly apply another platform/month's local drilldown.
+#=        if slug=='category-performance' and (performance or {}).get('_scope') not in (None,scope_signature(platform,month,population,filters)):
+#=            performance={'sort':(performance or {}).get('sort')}
+#=        updates=render_view(slug,platform,month,population,filters,performance,reason_state,options,opportunity_state) if slug else {}
+#=        population_changed=bool(triggered.intersection(shared))
+#=        # New report modules may omit a custom readiness summary. Keep the
+#=        # shared line current while preserving explicit drilldown summaries.
+#=        if slug!=mv.PAGE and 'readiness.children' not in updates:
+#=            if slug == 'platform-comparison':
+#=                cohort = [row for name in ('PLATFORM_A', 'PLATFORM_B')
+#=                          for row in p.cohort(rows, name, controls['comparison-population'], filters, bands)]
+#=            else:
+#=                cohort = p.cohort(rows, platform, population, filters, bands)
+#=            updates['readiness.children']=v.readiness(m.compare(cohort,month,available_months=dm.covered_months(snapshot,platform))['current'])
+#=        if slug=='missed-opportunity-analysis':
+#=            updates['readiness.children']='Prepared snapshot · distinct RFQ selections · current admin and recorded evidence; internal reconciliation remains required.'
+#=        population_label=('All report RFQs' if (controls['comparison-population'] if slug=='platform-comparison' else population)=='all' else 'CHF/USD/EUR/GBP · non-FX')
+#=        if filters.get('received'):
+#=            population_label+=' · Received RFQs only'
+#=        updates['print-filter-context.children']=REPORT_TITLE+' · '+('PLATFORM_A + PLATFORM_B' if slug=='platform-comparison' else platform)+' · '+month_label(month)+' · '+population_label+' · '+('; '.join(label+': '+', '.join(filters[key]) for key,label in FILTERS if filters[key]) or 'No additional filters')
+#=        active=[html.Strong('100% = '+('PLATFORM_A + PLATFORM_B' if slug=='platform-comparison' else platform)+' · '+population_label),*attribute_filter_chips(filters)]
+#=        analysis=options.get('analysis_filters') or {}
+#=        if analysis:
+#=            updates['print-filter-context.children']+=' · Analysis: '+('; '.join(label+': '+', '.join(analysis[key]) for key,label in FILTERS if analysis.get(key)))
+#=        if slug==mv.PAGE:
+#=            query=(opportunity_state or {}).get('query') or {}
+#=            active+=mv.active_filters(opportunity_index,opportunity_state or {})
+#=        updates['scope.children']=active;updates['scope.style']={} if active else {'display':'none'}
+#=        attribute_count=sum(bool(filters.get(key)) for key,_ in FILTERS)
+#=        updates['filter-summary.children']='Population filters'+(f' ({attribute_count})' if attribute_count else '')
+#=        # Each view already resolves its own display labels. Apply the brand
+#=        # profile only to the shared shell outputs added by this callback.
+#=        shell_updates = {key: updates[key] for key in common_updates if key in updates}
+#=        updates.update(branding.updates(shell_updates, brand_registry))
+#=        if population_changed or slug != mv.PAGE:
+#=            updates['definitions.children'] = definitions_panel
+#=        for identifier in CHART_IDS:
+#=            figure = updates.get(identifier+'.figure')
+#=            if figure is None:
+#=                continue
+#=            layout = figure.get('layout', {}) if isinstance(figure, dict) else figure.layout
+#=            height = layout.get('height') if isinstance(layout, dict) else layout.height
+#=            updates[identifier+'.style'] = {'height': str(int(height or 250))+'px', 'width': '100%'}
+#=        return [updates.get(key,no_update) for key in update_keys]
+#=
+#=    # Shared controls and Performance Explorer actions. The missed workspace
+#=    # owns its own scoped state; retired reason-page callbacks are not mounted.
+#=    action_specs=[('performance-state','data'),('platform','value'),('month','value'),('population','value'),
+#=                  *[('filter-'+key,'value') for key,_ in FILTERS],('extra-filters','open'),
+#=                  ('comparison-population','value'),('comparison-metric','value'),('exp-metric','value'),('exp-dimension','value')]
+#=    action_specs += [(identifier,'clickData') for identifier in CLICK_CHARTS]
+#=    action_outputs=[Output(identifier,prop) for identifier,prop in action_specs]
+#=    buttons=('reset','exp-clear-filters','exp-page-previous','exp-page-next','exp-filter-selection','analysis-explorer-clear')
+#=    action_inputs=global_inputs+[Input('location','pathname'),Input('analysis-explorer-state','data')]+[Input(identifier,'n_clicks') for identifier in buttons]
+# COPY BLOCK 5
+#=    control_inputs=('comparison-population','exp-metric','exp-dimension')
+#=    action_inputs += [Input(identifier,'value') for identifier in control_inputs]
+#=    action_inputs += [Input({'type':'filter-remove','field':ALL,'value':ALL},'n_clicks'),
+#=                      Input({'type':'perf-remove','index':ALL},'n_clicks'),
+#=                      Input({'type':'exp-sort','key':ALL},'n_clicks'),
+#=                      Input({'type':'exp-select','index':ALL},'n_clicks')]
+#=    action_inputs += [Input(identifier,'clickData') for identifier in CLICK_CHARTS]
+#=    action_states=[State('performance-state','data')]
+#=    action_states += [State(identifier,'value') for identifier in control_ids if identifier not in control_inputs]
+#=
+#=    @app.callback(action_outputs,action_inputs,action_states,prevent_initial_call=False)
+#=    def interact(*args):
+#=        def token(identifier):return identifier if isinstance(identifier,str) else str(identifier)
+#=        values={(token(item.component_id),item.component_property):value for item,value in zip([*action_inputs,*action_states],args)}
+#=        get=lambda identifier,prop='value':values.get((identifier,prop))
+#=        result={}
+#=        def set_value(identifier,prop,value):result[(identifier,prop)]=value
+#=        def done():
+#=            changed=result.get(('performance-state','data'))
+#=            if isinstance(changed,dict):
+#=                for name,value in (('_reset',reset_epoch),('_analysis_reset',analysis_epoch)):
+#=                    if value:changed[name]=value
+#=            return [result.get(spec,no_update) for spec in action_specs]
+#=        platform,month,population=get('platform'),get('month'),get('population')
+#=        receipt=get('filter-received')
+#=        filters=p.with_received_filter({key:get('filter-'+key) or [] for key,_ in FILTERS},receipt)
+#=        signature=scope_signature(platform,month,population,filters)
+#=        path=report_path(app,get('location','pathname'))
+#=        performance=copy.deepcopy(get('performance-state','data') or {})
+#=        reset_epoch=int(get('reset','n_clicks') or 0)
+#=        analysis_epoch=int(get('analysis-explorer-clear','n_clicks') or 0)
+#=        if reset_epoch>int(performance.get('_reset',0)) or analysis_epoch>int(performance.get('_analysis_reset',0)):
+#=            performance={'sort':performance.get('sort'),'_metric':get('exp-metric'),'_reset':reset_epoch}
+#=        trigger=ctx.triggered_id
+#=        if 'reset.n_clicks' in ctx.triggered_prop_ids:
+#=            trigger='reset'
+#=        if trigger is None and path in {'/rfq/volume-composition','/rfq/competitive-quotes','/rfq/quote-competitiveness'}:
+#=            trigger='location'
+#=        def explorer_action(event,value=None):
+#=            nonlocal performance
+#=            if route_slug(path)!='category-performance':raise PreventUpdate
+#=            if performance.get('_scope') not in (None,signature):
+#=                performance={'sort':performance.get('sort'),'_metric':get('exp-metric')}
+#=            options={key.replace('-','_'):get(key) for key in control_ids}
+#=            options['analysis_filters']=get('analysis-explorer-state','data') or {}
+#=            performance=ev.transition(snapshot,platform,month,population,filters,performance,options,event,value)
+#=            performance['_scope']=signature
+#=            if reset_epoch:performance['_reset']=reset_epoch
+#=            set_value('performance-state','data',performance)
+#=        if trigger=='reset':
+#=            # Clearing filters keeps the report scope and presentation choices.
+#=            # A fresh empty scope signature prevents old drilldowns resurfacing.
+#=            clean_filters=p.with_received_filter({key:[] for key,_ in FILTERS},receipt)
+#=            set_value('performance-state','data',{'sort':performance.get('sort'),
+#=                '_metric':get('exp-metric'),
+#=                '_scope':scope_signature(platform,month,population,clean_filters),'_reset':reset_epoch})
+#=            set_value('extra-filters','open',False)
+#=            for key,_ in FILTERS:set_value('filter-'+key,'value',[])
+#=            for identifier in CLICK_CHARTS:set_value(identifier,'clickData',None)
+#=            return done()
+#=        if trigger=='location':
+#=            if path=='/rfq/volume-composition':set_value('exp-metric','value','requested_share')
+#=            elif path in {'/rfq/competitive-quotes','/rfq/quote-competitiveness'}:
+#=                for identifier,value in ev.CONTROLS.items():set_value(identifier,'value',value)
+#=            else:raise PreventUpdate
+#=            set_value('performance-state','data',{'_reset':reset_epoch} if reset_epoch else {})
+#=            return done()
+#=        if trigger in scope_controls:
+#=            if performance and performance.get('_scope')==signature:raise PreventUpdate
+#=            set_value('performance-state','data',{'sort':performance.get('sort'),'_metric':get('exp-metric'),'_scope':signature,**({'_reset':reset_epoch} if reset_epoch else {})})
+#=            if trigger=='platform':set_value('population','value','all' if platform=='PLATFORM_B' else settings['default_population'])
+#=            return done()
+#=        if trigger=='comparison-population':raise PreventUpdate
+#=        if isinstance(trigger,str) and trigger in {'exp-metric','exp-dimension'}:
+#=            explorer_action('metric' if trigger=='exp-metric' else 'dimension');return done()
+#=        if trigger=='analysis-explorer-state':
+#=            performance.update(page=0,selection=[])
+#=            performance['_scope']=signature
+#=            if reset_epoch:performance['_reset']=reset_epoch
+#=            set_value('performance-state','data',performance);return done()
+#=        if trigger=='exp-filter-selection':
+#=            explorer_action('filter');return done()
+#=        if trigger=='analysis-explorer-clear':
+#=            explorer_action('clear');return done()
+#=        if isinstance(trigger,str) and trigger in {'exp-clear-filters','exp-page-previous','exp-page-next'}:
+#=            event={'exp-clear-filters':'clear','exp-page-previous':'previous','exp-page-next':'next'}[trigger]
+#=            explorer_action(event);return done()
+#=        if isinstance(trigger,dict):
+#=            clicks=ctx.triggered[0].get('value')
+#=            if not (any(clicks) if isinstance(clicks,(list,tuple)) else clicks):raise PreventUpdate
+#=            if trigger.get('type')=='filter-remove':
+#=                field=trigger.get('field')
+#=                if field not in dict(FILTERS):raise PreventUpdate
+#=                set_value('filter-'+field,'value',[value for value in filters[field]
+#=                                                  if str(value)!=trigger.get('value')])
+#=            elif trigger.get('type')=='perf-remove':explorer_action('remove',trigger['index'])
+#=            elif trigger.get('type')=='exp-sort':explorer_action('sort',trigger['key'])
+#=            elif trigger.get('type')=='exp-select':explorer_action('select',trigger['index'])
+#=            return done()
+#=        if trigger in CLICK_CHARTS:
+#=            click=get(trigger,'clickData')
+#=            if not click or not click.get('points'):raise PreventUpdate
+#=            point=click['points'][0];custom=point.get('customdata');value=custom[0] if isinstance(custom,list) else custom
+#=            if value is None:value=point.get('x')
+#=            if value is None or value not in months:raise PreventUpdate
+#=            set_value(trigger,'clickData',None)
+#=            set_value('month','value',value)
+#=            set_value('performance-state','data',{'sort':performance.get('sort'),'_metric':get('exp-metric'),**({'_reset':reset_epoch} if reset_epoch else {})})
+#=            return done()
+#=        raise PreventUpdate
+#=
+#=    # Simulation state is separate from actual performance selections/results.
+#=    # Office and demo snapshots accept hypothetical targets; scope changes invalidate
+#=    # them, while sorting, paging and selecting a history row keep their IDs.
+#=    whatif_inputs=global_inputs+[Input('exp-dimension','value'),Input('performance-state','data'),
+#=        Input('exp-whatif-toggle','n_clicks'),Input('exp-whatif-reset','n_clicks'),
+#=        Input('reset','n_clicks'),Input('analysis-explorer-clear','n_clicks'),Input('analysis-explorer-state','data'),
+#=        Input({'type':'exp-target','segment':ALL},'value')]
+#=    whatif_states=[State('exp-whatif-state','data'),State('exp-metric','value'),State('location','pathname')]
+#=
+#=    @app.callback(Output('exp-whatif-state','data'),whatif_inputs,whatif_states,prevent_initial_call=True)
+#=    def simulate(*args):
+#=        values={(str(item.component_id),item.component_property):value
+#=                for item,value in zip(whatif_inputs+whatif_states,args)}
+#=        get=lambda identifier,prop='value':values.get((str(identifier),prop))
+#=        state=get('exp-whatif-state','data') or {}
+#=        if route_slug(report_path(app,get('location','pathname')))!='category-performance':
+#=            if not state.get('enabled') and not state.get('targets'):raise PreventUpdate
+#=            return {'enabled':False,'targets':{}}
+#=        platform,month,population=get('platform'),get('month'),get('population')
+#=        filters=p.with_received_filter({key:get('filter-'+key) or [] for key,_ in FILTERS},get('filter-received'))
+#=        analysis=get('analysis-explorer-state','data') or {}
+#=        performance=get('performance-state','data') or {}

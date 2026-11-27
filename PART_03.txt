@@ -1,0 +1,385 @@
+#=    print("Stopped after the requested diagnostic stage. No analytical run was published.")
+#=    return 0
+#=
+#=
+#=def probe_port(port):
+#=    if not 1 <= port <= 65535:
+#=        raise RunError("Stage: startup. Choose a port between 1 and 65535.")
+#=    try:
+#=        with socket.socket() as probe:
+#=            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+#=            probe.bind(("127.0.0.1", port))
+#=    except OSError as exc:
+#=        if exc.errno in (errno.EPERM, errno.EACCES):
+#=            raise RunError("Stage: startup. This process is not permitted to open a local server. Run the launcher from your approved local terminal/environment. No application was stopped.") from None
+#=        raise RunError("Stage: startup. The port is occupied or unavailable. Close the previous app terminal or use --port 8055. No other application was stopped.") from None
+#=
+#=
+#=def start_server(cfg, snapshot, args):
+#=    from coupon_lab.ui.app import create_app
+#+    from coupon_lab.daily import DailyService
+#=    settings = settings_for_ui(cfg, snapshot)
+#+    settings["_daily_service"] = DailyService(cfg, demo=snapshot.get("mode") == "demo")
+#=    port = args.port or settings["port"]
+#=    probe_port(port)
+#=    identity = {"app_id": "coupon-lab-office", "version": VERSION, "source_signature": code_signature(ROOT),
+#=                "run_id": snapshot.get("run_id", "explicit-demo")}
+#=    app = create_app(settings, identity, snapshot)
+#=    client = app.server.test_client()
+#=    if client.get("/_dash-layout").status_code != 200:
+#=        raise RunError("Stage: interface. Layout validation failed. Run selftest and consult the troubleshooting guide.")
+#=    print("[5/6] Dashboard layout and local assets ready", flush=True)
+#=    url = f"http://127.0.0.1:{port}/rfq/general-overview"
+#=    print("[6/6] " + VERSION + " · " + snapshot.get("validation_status", "Synthetic demonstration") + "\n" + url, flush=True)
+#=    if not args.no_browser:
+#=        threading.Timer(0.8, lambda: webbrowser.open(url)).start()
+#=    from werkzeug.serving import make_server
+#=    with make_server("127.0.0.1", port, app.server, threaded=True) as server:
+#=        server.serve_forever()
+#=
+#=
+#=def support_summary(cfg, versions):
+#=    # Whitelist aggregate/runtime metadata. Never include settings, paths,
+#=    # SQL, identifiers, messages, credentials or raw exception contents.
+#=    return {"release": VERSION, "runtime": versions, "mode": cfg.get("mode", "office"),
+#=            "configured_feedback_roles": len(cfg.get("feedback", {})),
+#=            "configured_sld_roles": len(cfg.get("sld", {}).get("roles", {})),
+#=            "instructions": "Share only under office policy. For an error, add its stage/code and the specific documentation requested by 00_START_WITH_GPT.txt."}
+#=
+#=
+#=def main(argv=None):
+#=    parser = argparse.ArgumentParser(description="Coupon Lab local office dashboard")
+#-    parser.add_argument("command", choices=("check", "prepare", "start", "demo", "selftest", "release-check", "reconcile", "support", "mapping-review", "performance-check"))
+#+    parser.add_argument("command", choices=("check", "prepare", "start", "demo", "selftest", "release-check", "reconcile", "support", "mapping-review", "performance-check", "daily-capture"))
+#=    parser.add_argument("--settings", default=str(ROOT / "settings.json"))
+#+    parser.add_argument("--latest", action="store_true", help="Start with the latest completed snapshot in the configured output folder")
+#+    parser.add_argument("--date", help="Zurich reporting date (YYYY-MM-DD) for daily-capture")
+#+    parser.add_argument("--preview", action="store_true", help="Read daily figures for reconciliation without saving a snapshot")
+#=    parser.add_argument("--run", help="Completed internal run folder; no database refresh")
+#=    parser.add_argument("--port", type=int)
+#=    parser.add_argument("--no-browser", action="store_true")
+#=    parser.add_argument("--iterations", type=int, default=3, help="Performance-check repetitions, from 1 to 10")
+#=    parser.add_argument("--step", choices=("feedback", "sld", "references", "classification", "metrics"))
+#=    args = parser.parse_args(argv)
+#=    try:
+#+        if args.latest and args.command != "start":
+#+            raise RunError("Stage: launcher. Use --latest with start.")
+#+        if (args.date or args.preview) and args.command != "daily-capture":
+#+            raise RunError("Stage: launcher. Use --date and --preview with daily-capture.")
+#=        print("[1/3] Checking Python, packages and release configuration" if args.command == "performance-check" else "[1/6] Checking Python, packages and release configuration", flush=True)
+#=        versions = runtime_check()
+#=        if args.command in {"selftest", "release-check"}:
+#=            import unittest
+#=            loader = unittest.TestLoader()
+#=            suite = loader.discover(str(ROOT / "tests"), pattern="test_*.py")
+#=            if args.command == "release-check":
+#=                print("Clean-source acceptance includes the supplied reference population; reviewed office copies may intentionally differ.", flush=True)
+#=                suite.addTests(loader.discover(str(ROOT / "tests"), pattern="release_checks.py"))
+#=            else:
+#=                print("Portable synthetic checks; configured office inputs, references and connection are not loaded.", flush=True)
+#=            result = unittest.TextTestRunner(verbosity=2).run(suite)
+#=            print(f"Synthetic checks: {result.testsRun} run; {len(result.failures)} failures; {len(result.errors)} errors; {len(result.skipped)} skipped. Office reconciliation remains separate.", flush=True)
+#=            return 0 if result.wasSuccessful() else 1
+#=        if args.command == "demo":
+#=            from coupon_lab.demo import build_demo
+#=            from coupon_lab.config import load_settings
+#=            from coupon_lab.sources import load_references
+#=            from coupon_lab.normalize import validate_references
+#=            cfg = load_settings(Path(args.settings))
+#=            probe_port(args.port or cfg.get("app", {}).get("port",8054))
+#=            refs = validate_references({"references": load_references(cfg)}, cfg)
+#=            # Reviewed reason/product grouping also appears in local review.
+#=            # This branch never loads feedback or opens SLD.
+#=            snapshot = build_demo(main_reason_mappings=list(refs["main_reasons"].values()),
+#=                                  product_mappings=list(refs["products"].values()),
+#=                                  opportunity_reason_rules=refs["opportunity_rules"])
+#=            start_server(cfg, snapshot, args)
+#=            return 0
+#=        from coupon_lab.config import load_settings, preflight
+#=        cfg = load_settings(Path(args.settings))
+#=        cfg["_runtime_versions"] = versions
+#+        if args.command == "daily-capture":
+#+            from coupon_lab.daily import DailyService
+#+            if not args.date:
+#+                raise RunError("Stage: daily capture. Supply --date YYYY-MM-DD.")
+#+            service = DailyService(cfg)
+#+            if args.preview:
+#+                view = service.preview(args.date)
+#+                print(dumps({key: view[key] for key in ("day", "read_at", "requests", "eflow", "voiceflow", "warnings")}))
+#+                print("Internal preview. No daily snapshot was saved.")
+#+                return 0
+#+            service.capture(args.date)
+#+            print(f"Daily Reporting snapshot available for {args.date}.")
+#+            return 0
+#=        if args.command == "support":
+#=            print(json.dumps(support_summary(cfg, versions), indent=2))
+#=            return 0
+#=        if args.command == "performance-check":
+#=            if not args.run:
+#=                raise RunError("Stage: performance check. Supply --run with a completed run. This command never prepares data or queries SLD.")
+#=            if not 1 <= args.iterations <= 10:
+#=                raise RunError("Stage: performance check. Use --iterations from 1 to 10.")
+#=            print("[2/3] Verifying the completed snapshot; no SLD connection", flush=True)
+#=            snapshot, _ = open_completed_run(cfg, args.run)
+#=            from coupon_lab.performance_check import performance_report
+#=            report = performance_report(snapshot, versions=versions,
+#=                                        settings=settings_for_ui(cfg, snapshot), iterations=args.iterations)
+#=            print("[3/3] Python timing complete; browser and office acceptance remain separate", flush=True)
+#=            print(json.dumps(report, indent=2))
+#=            return 0
+#=        if args.command == "mapping-review" and not args.run:
+#=            raise RunError("Stage: mapping review. Supply --run with a completed preparation. This command never extracts SLD or activates mappings.")
+#=        if args.step:
+#=            if args.command not in {"check", "prepare"}:
+#=                raise RunError("Stage: command. Use --step with check or prepare for stage diagnosis.")
+#=            return diagnose(cfg, args.step)
+#=        if args.command == "check":
+#=            result = preflight(cfg, check_sources=True)
+#=            from coupon_lab.sources import load_feedback
+#=            feedback = load_feedback(cfg)
+#=            from coupon_lab.normalize import validate_references
+#=            validate_references(feedback, cfg)
+#=            result = {"preflight": result, "feedback_row_counts": {role: len(feedback["tables"][role]) for role in ("platform_a", "platform_b")}}
+#=            print(dumps(result))
+#=            print("Local preflight, original-file headers and reference validation completed. Database connectivity and analytical reconciliation are checked during prepare/start.")
+#=            return 0
+#=        if args.command == "start":
+#=            probe_port(args.port or cfg.get("app", {}).get("port", 8054))
+#-        if args.run:
+#+        if args.latest and not args.run:
+#+            run = latest_completed_run(cfg)
+#+            try:
+#+                # Shared desktop pilot reopens the published bytes even after
+#+                # source or app changes. Still verify the snapshot and reconciliation hashes.
+#+                snapshot, _ = reopen_run(run, ROOT, verify=False)
+#+            except (OSError, ValueError, TypeError, RunError) as exc:
+#+                raise RunError(f"Stage: launcher. Cannot open the latest completed run in {run.parent}. "
+#+                               "Restore a valid completed run and its latest.json pointer.") from exc
+#+            print("Opened the latest completed run. No monthly preparation was started.", flush=True)
+#+        elif args.run:
+#=            snapshot, _ = open_completed_run(cfg, args.run)
+#=            run = Path(args.run)
+#=            print("Reopened completed snapshot; no SLD refresh was performed.", flush=True)
+#=        else:
+#=            snapshot, run = prepare(cfg)
+#=        if args.command == "reconcile":
+#=            print("Internal reconciliation worksheet: " + str(run / "reconciliation.json"))
+#=            print("Compare with source totals and trace RFQs internally. This command does not mark the data reconciled.")
+#=            return 0
+#=        if args.command == "mapping-review":
+#=            from coupon_lab.mapping_review import create_review
+#=            result = create_review(snapshot, cfg["_root"] / "outputs")
+#=            print("Internal mapping worksheet: " + str(result["path"]))
+#=            print(f"Observed product codes: {result['observed_codes']}; new pending codes: {result['added_pending_codes']}; worksheet rows: {result['worksheet_rows']}.")
+#=            if not result["inventory_complete"]:
+#=                print("Inventory incomplete: applicable product/source/link coverage is unavailable. These are observed codes only; resolve coverage and regenerate before treating the list as complete.")
+#=            print("No mapping was activated or overwritten. Review inside office using docs/13_OFFICE_REASON_MAPPING_TASK.txt, then prepare a new run.")
+#=            return 0
+#=        print(f"Prepared {len(snapshot['rows']):,} feedback RFQs across {len(snapshot['months'])} reporting months.", flush=True)
+#=        print("Completed run: " + str(run), flush=True)
+#=        if args.command == "prepare":
+#=            return 0
+#=        start_server(cfg, snapshot, args)
+#=        return 0
+#=    except KeyboardInterrupt:
+#=        print("Stopped locally. Completed run folders are preserved.")
+#=        return 0
+#=    except Exception as exc:
+#=        # Only our explicitly safe exception classes are allowed to carry text.
+#=        if isinstance(exc, RunError) or getattr(exc, "safe_message", False):
+#=            print(str(exc), file=sys.stderr)
+#=        else:
+#=            from coupon_lab.errors import PipelineError
+#=            if isinstance(exc, PipelineError):
+#=                print(str(exc), file=sys.stderr)
+#=            else:
+#=                frames = traceback.extract_tb(exc.__traceback__)
+#=                local = [f for f in frames if str(ROOT) in f.filename]
+#=                frame = local[-1] if local else None
+#=                location = (Path(frame.filename).name + ":" + str(frame.lineno)) if frame else "launcher"
+#=                print("Stage: unexpected failure. Location: " + location + ". Consult 00_START_WITH_GPT.txt and run selftest. Source values and raw exception details were suppressed.", file=sys.stderr)
+#=        return 1
+#=
+#=
+#=if __name__ == "__main__":
+#=    raise SystemExit(main())
+# FILE {"kind": "app", "name": "coupon_lab/ui/app.py", "new_lf": true, "old_lf": true}
+#-"""Offline Coupon Lab shell for a required prepared office/demo snapshot.
+#+"""Coupon Lab shell for a prepared monthly snapshot and a daily service.
+#=
+#-The snapshot is fixed at successful preparation. UI filters never refresh data.
+#+Monthly snapshot filters never refresh source data. The separate Daily Reporting
+#+page delegates refreshes and shared manual entries to its server-owned service.
+#=All assets are local; native browser printing exports the active named view.
+#="""
+#=from datetime import date
+#=from pathlib import Path
+#=import copy
+#=import hashlib
+#=import json
+#=from dash import Dash, Input, Output, State, ALL, ctx, dcc, html, no_update, ClientsideFunction
+#=from dash.exceptions import PreventUpdate
+#=from coupon_lab.shared import metrics as m
+#=from coupon_lab.brands import registry_for
+#=from coupon_lab.product_reference import conditional_coupon_value
+#=from .components import field, dropdown
+#=from .navigation import report_path
+#=from .product_labels import product_label
+#=from .formatting import swiss_timestamp
+#=from . import explorer as ev
+#=from . import model as dm, views as v, performance as p, performance_views as pv
+#=from . import missed_views as mv
+#=from . import explorer_whatif as ew
+#=from . import analysis_filters as af
+#=from . import branding
+#+from . import daily_reporting as daily
+#=
+#=WORKSPACE_TITLE = 'IHHS Data Cockpit'
+#=REPORT_TITLE = 'MIP Feedback Analysis'
+#=
+#=VIEWS=(('general-overview','Overview','General Performance'),('category-performance','Performance Explorer','General Performance'),
+#=       ('platform-comparison','Platform Comparison','General Performance'),
+#=       ('missed-opportunity-analysis','Reason Analysis','Missed Opportunities'))
+#=FILTERS=af.FIELDS
+#=CLICK_CHARTS=tuple(pv.CLICK_CHARTS)
+#=CLICK_TABLES=tuple(pv.CLICK_TABLES)
+#=CHART_IDS=(*pv.CHART_IDS,*mv.CHART_IDS)
+#=
+#=
+#=def month_label(value):
+#=    return date.fromisoformat(value+'-01').strftime('%B %Y')
+#=
+#=
+#=def comparison_label(month,available_months):
+#=    current=date.fromisoformat(month+'-01')
+#=    previous=date(current.year-1,12,1) if current.month==1 else date(current.year,current.month-1,1)
+#=    key=previous.strftime('%Y-%m')
+#=    return month_label(key) if key in available_months else 'Unavailable'
+#=
+#=
+#=def route_slug(path):
+#=    path=(path or '').rstrip('/')
+#+    if path == '/daily-reporting':
+#+        return daily.PAGE
+#=    aliases={'/rfq/missed-opportunities':'missed-opportunity-analysis',
+#=             '/rfq/missed-priorities':'missed-opportunity-analysis','/rfq/reasons-coverage':'missed-opportunity-analysis',
+#=             '/rfq':'general-overview','/rfq/history-ytd':'general-overview','/rfq/segment-performance':'category-performance',
+#=             '/rfq/performance-explorer':'category-performance','/rfq/volume-composition':'category-performance',
+#=             '/rfq/competitive-quotes':'category-performance','/rfq/quote-competitiveness':'category-performance'}
+#=    return aliases.get(path) or next((slug for slug,_,_ in VIEWS if path=='/rfq/'+slug),None)
+#=
+#=
+#=def scope_signature(platform,month,population,filters):
+#=    return hashlib.sha256(json.dumps([platform,month,population,filters],sort_keys=True).encode()).hexdigest()
+#=
+#=
+#=def attribute_filter_chips(filters):
+#=    """Show each active attribute once, with an action that removes only it."""
+#=    chips=[]
+#=    for key,label in FILTERS:
+#=        for value in filters.get(key) or []:
+#=            text=label+': '+str(value)
+#=            chips.append(html.Span([html.Span(text),html.Button('×',
+#=                id={'type':'filter-remove','field':key,'value':str(value)},n_clicks=0,
+#=                title='Remove '+text,**{'aria-label':'Remove '+text})],
+#=                className='scope-tag removable-filter'))
+#=    return chips
+#=
+#=
+# COPY BLOCK 4
+#=def create_app(settings,identity,snapshot=None, *, browser_prefix='/', route_prefix='/'):
+#=    if snapshot is None:
+#=        raise ValueError('create_app requires a prepared snapshot; select office or demo in the launcher.')
+#=    if snapshot.get('mode') not in {'office','demo'}:
+#=        raise ValueError('Snapshot mode must explicitly be office or demo.')
+#=    if any(not isinstance(prefix, str) or not prefix.startswith('/') or not prefix.endswith('/')
+#=           for prefix in (browser_prefix, route_prefix)):
+#=        raise ValueError('Dash path prefixes must start and end with a slash.')
+#=    brand_registry=registry_for(settings)
+#=    snapshot=dict(snapshot)
+#=    snapshot['_brand_repository']=brand_registry.data
+#=    snapshot['ticket_size_bands']=settings.get('ticket_size_bands',[100000,500000,1000000])
+#=    rows,months=snapshot['rows'],snapshot['months']
+#=    from coupon_lab.missed_analysis import build_index
+#=    opportunity_index=build_index(snapshot)
+#=    bands=snapshot['ticket_size_bands']
+#=    demo=snapshot.get('mode')=='demo'
+#=    synthetic_smoke=snapshot.get('synthetic_smoke') is True
+#=    snapshot_label=('Synthetic smoke snapshot · ' if synthetic_smoke else 'Prepared snapshot · ')+swiss_timestamp(snapshot.get('generated_at'))
+#=    filter_choices=dict(settings['filter_choices'])
+#=    filter_choices['outcome']=p.OUTCOME_CHOICES
+#=    filter_choices['product']=sorted({product_label(row) for row in rows})
+#=    # Existing/demo snapshots can predate the optional product feature.
+#=    # Missing metadata is Unknown, never an assumed uncapped product.
+#=    filter_choices['capped']=sorted({str(row.get('capped') or 'Unknown') for row in rows})
+#=    filter_choices['conditional_coupon']=sorted({conditional_coupon_value(row) for row in rows})
+#=    filter_choices['ticket_size']=p.band_labels(bands)
+#=    filter_choices['underlying']=sorted({symbol for row in rows for symbol in row['underlyings']})
+#=    settings={**settings,'filter_choices':filter_choices}
+#=    app=Dash(__name__,title='Coupon Lab · '+REPORT_TITLE,serve_locally=True,
+#=             assets_folder=str(Path(__file__).with_name('assets')),update_title=None,
+#=             requests_pathname_prefix=browser_prefix,routes_pathname_prefix=route_prefix)
+#=    @app.server.get(route_prefix+'_ihhs-prototype/status')
+#=    def status():return identity
+#=
+#=    @app.server.after_request
+#=    def callback_revision(response):
+#=        from flask import request
+#=        revision=request.headers.get('X-CouponLab-Revision','')
+#=        if request.path.endswith('/_dash-update-component') and revision.isdecimal() and len(revision)<=20:
+#=            response.headers['X-CouponLab-Revision']=revision
+#=        return response
+#=
+#=    pages=pv.layouts(snapshot,settings)+mv.layouts(snapshot,settings)
+#+    daily_service=settings.get('_daily_service')
+#=    nav=[]
+#=    for group in dict.fromkeys(item[2] for item in VIEWS if item[2]):
+#=        nav.append(html.Div([html.Div(group,className='nav-caption'),*[dcc.Link([html.Span(f'{i+1:02d}',className='nav-number'),html.Span(label)],
+#=                   href=app.get_relative_path('/rfq/'+slug),id='nav-'+slug,className='nav-link') for i,(slug,label,g) in enumerate(VIEWS) if g==group]],className='nav-group'))
+#+    nav.append(html.Div([html.Div('Daily activity',className='nav-caption'),
+#+        dcc.Link([html.Span('D',className='nav-number'),html.Span('Daily Reporting')],
+#+                 href=app.get_relative_path('/daily-reporting'),id='nav-daily-reporting',className='nav-link')],className='nav-group'))
+#=    additional=[field(label,dropdown('filter-'+key,filter_choices[key],[],True)) for key,label in FILTERS]
+#=    population_options=[{'label':'CHF / USD / EUR / GBP · non-FX','value':'restricted'},{'label':'All report RFQs','value':'all'}]
+#=    app.layout=html.Div([
+#=      dcc.Location(id='location',refresh=False),dcc.Store(id='performance-state',data={}),dcc.Store(id='logo-route-state'),
+#=      dcc.Store(id='whatif-measure-state',data={}),
+#=      html.Aside([
+#=        dcc.Link([html.Span(html.Img(src=app.get_asset_url('coupon-lab-v1.png'),alt='Coupon Lab',
+#=                                    id='coupon-lab-sign',className='brand-sign'),className='brand-sign-light'),
+#=                  html.Span(WORKSPACE_TITLE,className='brand-subtitle')],href=app.get_relative_path('/'),className='brand',title='Coupon Lab — all reports'),
+#-        html.Div([html.Div('REPORT',className='report-label'),dcc.Link(REPORT_TITLE,href=app.get_relative_path('/rfq/general-overview'),className='report-name')],className='report-selector'),
+#+        html.Div([html.Div('REPORT',className='report-label'),dcc.Link(REPORT_TITLE,id='selected-report-link',href=app.get_relative_path('/rfq/general-overview'),className='report-name')],className='report-selector'),
+#=        html.Nav(nav,id='report-navigation',**{'aria-label':'RFQ views'}),
+#=        html.Div([dcc.Link('← All reports',href=app.get_relative_path('/'),className='home-link'),html.Div('+ Further reports planned',className='planned-report')],className='sidebar-bottom'),
+#=      ],className='cockpit-sidebar'),
+#=      html.Div([
+#=        html.Header(html.Div(id='breadcrumbs',className='breadcrumbs'),className='topbar'),
+#=        html.Main([
+#=          html.Div([
+#=            html.Div([html.Div('Coupon Lab · '+WORKSPACE_TITLE,className='page-kicker'),html.H1('Reports'),html.P('Electronic structured products issuance')],className='home-heading'),
+#=            html.Div([
+#=              dcc.Link([html.Div(html.Span('RFQ',className='report-icon'),className='report-card-top'),
+#=                        html.H2(REPORT_TITLE),html.P('Monthly performance, quote coverage and financially relevant missed opportunities.'),
+#=                        html.Div([html.Span('[[brand:platform_a]] · [[brand:platform_b]] · '+months[0][:4]+'–'+months[-1][:4]),html.Span('Open report →')],className='report-open')],href=app.get_relative_path('/rfq/general-overview'),className='report-card'),
+#-              html.Div([html.Span('+',className='future-symbol'),html.H2('Further reports'),html.P('A home for additional analytics reports.'),html.Span('Planned',className='report-status')],className='report-card future-card'),
+#+              dcc.Link([html.Div(html.Span('DAY',className='report-icon'),className='report-card-top'),
+#+                        html.H2('Daily Reporting'),html.P('Daily eFlow and voiceflow figures, subscription activity and shared manual entries.'),
+#+                        html.Div([html.Span('Today and saved report days'),html.Span('Open report →')],className='report-open')],
+#+                       href=app.get_relative_path('/daily-reporting'),className='report-card',id='daily-report-card'),
+#=            ],className='report-cards'),
+#=            html.P(f"{len(rows):,} {'synthetic' if demo or synthetic_smoke else 'loaded'} RFQs · {month_label(months[0])}–{month_label(months[-1])} · offline prepared snapshot.",className='home-footnote'),
+#=          ],id='home-page',className='home-page'),
+#=          html.Div([
+#=            html.Div([
+#=              html.Div([html.Span(id='view-position',className='view-position'),html.H1(id='view-title')]),
+#=              html.Div([html.Details([html.Summary('Data & definitions'),html.Div(id='definitions',className='definitions-grid')],className='utility-panel'),
+#=                        html.Button('Export PDF',id='export-pdf',n_clicks=0,className='button export-button',title='Print the active view. Choose Save as PDF, A3 landscape, and enable background graphics.')],className='view-actions'),
+#=            ],className='view-heading'),
+#=            html.Div([
+#=              html.Span(snapshot_label,className='snapshot-item'),
+#=            ],className='snapshot-strip snapshot-context',role='status'),
+#=            html.Section([
+#=              html.Div([
+#=                html.Div([html.Label('Platform',htmlFor='platform',id='platform-label'),dropdown('platform',['PLATFORM_A','PLATFORM_B'],settings['default_platform']),
+#=                          html.Div('[[brand:platform_a]] + [[brand:platform_b]]',id='both-platforms',className='fixed-control',style={'display':'none'})],className='filter-field'),

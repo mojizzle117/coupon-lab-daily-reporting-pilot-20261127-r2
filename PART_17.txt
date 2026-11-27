@@ -1,0 +1,415 @@
+#+    def test_holiday_on_friday_rolls_monday_back_to_thursday(self):
+#+        self.a.options["holidays"] = ["2026-11-27"]
+#+        with patch.object(self.a, "today", return_value=date(2026, 11, 30)):
+#+            self.assertEqual(self.a.previous_day(), date(2026, 11, 26))
+# FILE {"kind": "app", "name": "tests/test_daily_ui.py", "new_lf": true}
+#+"""Synthetic HTTP callback checks for the daily page; no bank sources are read.
+#+
+#+Run: python -m unittest discover -s tests -p test_daily_ui.py -v
+#+The fake service isolates routing, displayed state, retries and editor behavior.
+#+Business calculations and SQLite transactions have separate service/store tests.
+#+"""
+#+from copy import deepcopy
+#+from datetime import date
+#+import json
+#+from pathlib import Path
+#+import tempfile
+#+import unittest
+#+
+#+from coupon_lab.ui.app import create_app, VIEWS
+#+from coupon_lab.ui.daily_reporting import DailyUIError
+#+from test_ui import fixture, props
+#+
+#+
+#+class FakeService:
+#+    def __init__(self):
+#+        self.calls = []
+#+        self.entries = []
+#+        self.accepted = set()
+#+        self.fail = None
+#+
+#+    def today(self):
+#+        return date(2026, 11, 30)
+#+
+#+    def previous_day(self):
+#+        # A service-owned holiday calendar, deliberately not just yesterday.
+#+        return date(2026, 11, 25)
+#+
+#+    def days(self):
+#+        return ['2026-11-18', '2026-11-25', '2026-11-30']
+#+
+#+    def load(self, day):
+#+        self.calls.append(('load', day))
+#+        if self.fail:
+#+            raise self.fail
+#+        return {'day': day, 'generated_at': '2026-11-30T08:00:00Z', 'read_at': '2026-11-30T07:59:00Z',
+#+                'source_state': 'live' if day == '2026-11-30' else 'saved',
+#+                'snapshot_saved_at': None, 'capture_label': '', 'requests': {'eflow': 4, 'voiceflow': 2, 'unknown': 0},
+#+                'eflow': {'request_count': 4, 'trade_count': 2, 'volume_chf': '500001', 'pnl_chf': '2000'},
+#+                'voiceflow': {'request_count': 2, 'trade_count': 1, 'provisional': False},
+#+                'eflow_trades': [{'trade_id': 'T1', 'product_type': 'BRC', 'amount': '500001', 'currency': 'CHF',
+#+                                  'underlyings': 'TEST SW', 'provider': 'Fictional provider', 'provider_provisional': True, 'platform': 'Platform A'}],
+#+                'voiceflow_trades': [], 'subscription_wins': [deepcopy(e) for e in self.entries if e['event_type'] == 'win' and not e['removed']],
+#+                'subscription_issuances': [], 'pre_hedges': [], 'manual_entries': deepcopy(self.entries),
+#+                'voice_options': [{'label': 'T2 · BRC · CHF', 'value': 'T2'}], 'warnings': []}
+#+
+#+    def capture(self, day):
+#+        self.calls.append(('capture', day))
+#+        result = self.load(day)
+#+        result.update(capture_label='Reconstructed after report day', snapshot_saved_at='2026-11-30T08:00:00Z')
+#+        return result
+#+
+#+    def add(self, day, values, token):
+#+        self.calls.append(('add', day, deepcopy(values), token))
+#+        if token not in self.accepted:
+#+            self.entries.append({'id': len(self.entries) + 1, 'revision': 1, 'report_day': day,
+#+                                 'removed': False, **values})
+#+            self.accepted.add(token)
+#+
+#+    def link(self, day, entry_id, rev, trade_id, token, *, confirmed_missing=False):
+#+        self.calls.append(('link', day, entry_id, rev, trade_id, token, confirmed_missing))
+#+        if token in self.accepted:
+#+            return
+#+        entry = self.entries[entry_id - 1]
+#+        if entry['revision'] != rev:
+#+            raise DailyUIError('Entry changed. Refresh and select it again.')
+#+        entry.update(trade_id=trade_id, confirmed_missing=confirmed_missing, revision=rev + 1)
+#+        self.accepted.add(token)
+#+
+#+    def remove(self, day, entry_id, rev, token):
+#+        self.calls.append(('remove', day, entry_id, rev, token))
+#+        entry = self.entries[entry_id - 1]
+#+        if entry['revision'] != rev:
+#+            raise DailyUIError('Entry changed. Refresh and select it again.')
+#+        entry.update(removed=True, revision=rev + 1)
+#+
+#+
+#+class DailyUITests(unittest.TestCase):
+#+    def setUp(self):
+#+        settings, snapshot = fixture()
+#+        self.service = FakeService()
+#+        settings['_daily_service'] = self.service
+#+        self.app = create_app(settings, {}, snapshot)
+#+        self.client = self.app.server.test_client()
+#+        self.defaults = props(self.client.get('/_dash-layout').get_json())
+#+
+#+    def invoke(self, target, changed, values=None, app=None):
+#+        app = app or self.app
+#+        route = app.config.routes_pathname_prefix
+#+        defaults = self.defaults if app is self.app else props(app.server.test_client().get(route + '_dash-layout').get_json())
+#+        values = {('location', 'pathname'): app.config.requests_pathname_prefix + 'daily-reporting', **(values or {})}
+#+        for key, metadata in app.callback_map.items():
+#+            outputs = metadata['output'] if isinstance(metadata['output'], list) else [metadata['output']]
+#+            if any(str(output) == target for output in outputs):
+#+                break
+#+        else:
+#+            self.fail('Callback missing: ' + target)
+#+        def args(items):
+#+            return [{'id': item['id'], 'property': item['property'],
+#+                     'value': values.get((item['id'], item['property']), defaults.get(item['id'], {}).get(item['property']))}
+#+                    if not item['id'].startswith('{') else [] for item in items]
+#+        response = app.server.test_client().post(route + '_dash-update-component', json={
+#+            'output': key, 'outputs': [{'id': output.component_id, 'property': output.component_property} for output in outputs]
+#+            if isinstance(metadata['output'], list) else {'id': outputs[0].component_id, 'property': outputs[0].component_property},
+#+            'inputs': args(metadata['inputs']), 'state': args(metadata['state']), 'changedPropIds': [changed]})
+#+        self.assertIn(response.status_code, (200, 204), response.get_data(as_text=True)[:300])
+#+        return response.get_json()['response'] if response.status_code == 200 else None
+#+
+#+    def load(self, **values):
+#+        return self.invoke('daily-view.data', 'location.pathname', values)
+#+
+#+    def test_route_card_prefix_and_monthly_separation(self):
+#+        self.assertNotIn('daily-reporting', {item[0] for item in VIEWS})
+#+        self.assertEqual(self.defaults['daily-report-card']['href'], '/daily-reporting')
+#+        route = self.invoke('home-page.style', 'location.pathname')
+#+        self.assertEqual(route['daily-page']['style'], {})
+#+        self.assertEqual(route['report-page']['style'], {'display': 'none'})
+#+        self.assertFalse(route['daily-interval']['disabled'])
+#+        self.assertEqual(route['selected-report-link']['children'], 'Daily Reporting')
+#+        # Entering the daily route cannot calculate or repaint monthly panels.
+#+        self.assertIsNone(self.invoke('readiness.children', 'location.pathname'))
+#+        home = self.invoke('home-page.style', 'location.pathname', {('location', 'pathname'): '/'})
+#+        self.assertTrue(home['daily-interval']['disabled'])
+#+        self.assertEqual(home['daily-page']['style'], {'display': 'none'})
+#+        for browser, internal in (('/pilot/', '/'), ('/pilot/', '/pilot/')):
+#+            settings, snapshot = fixture()
+#+            settings['_daily_service'] = self.service
+#+            app = create_app(settings, {}, snapshot, browser_prefix=browser, route_prefix=internal)
+#+            response = self.invoke('home-page.style', 'location.pathname', app=app)
+#+            self.assertEqual(response['daily-page']['style'], {})
+#+            self.assertEqual(response['selected-report-link']['href'], '/pilot/daily-reporting')
+#+
+#+    def test_previous_business_day_all_days_and_refresh_triggers(self):
+#+        self.assertEqual(self.defaults['daily-day']['value'], '2026-11-25')
+#+        first = self.load()
+#+        self.assertEqual({item['value'] for item in first['daily-day']['options']}, set(self.service.days()))
+#+        for trigger in ('daily-day.value', 'daily-interval.n_intervals', 'daily-refresh.n_clicks'):
+#+            response = self.invoke('daily-view.data', trigger, {('daily-day', 'value'): '2026-11-30'})
+#+            self.assertEqual(response['daily-view']['data']['day'], '2026-11-30')
+#+            self.assertIn('In progress', json.dumps(response['daily-content']))
+#+        today = self.invoke('daily-day.value', 'daily-today.n_clicks', {('daily-today', 'n_clicks'): 1})
+#+        self.assertEqual(today['daily-day']['value'], '2026-11-30')
+#+        previous = self.invoke('daily-day.value', 'daily-previous.n_clicks', {('daily-previous', 'n_clicks'): 1})
+#+        self.assertEqual(previous['daily-day']['value'], '2026-11-25')
+#+
+#+    def test_add_retry_reload_and_typed_inputs_preserved(self):
+#+        first = self.load()['daily-view']['data']
+# COPY BLOCK 23
+#+        state = {('daily-view', 'data'): first, ('daily-operation', 'data'): 'one-browser',
+#+                 ('daily-product-type', 'value'): 'BRC', ('daily-amount', 'value'): '001.25',
+#+                 ('daily-currency', 'value'): 'chf', ('daily-underlyings', 'value'): 'TEST/A; TEST B'}
+#+        result = self.invoke('daily-view.data', 'daily-add.n_clicks', state)
+#+        self.assertEqual(len(self.service.entries), 1)
+#+        self.assertEqual(self.service.entries[0]['amount'], '001.25')
+#+        self.assertEqual(self.service.entries[0]['underlyings'], 'TEST/A; TEST B')
+#+        self.assertNotIn('daily-product-type', result)
+#+        self.assertNotIn('daily-amount', result)
+#+        self.invoke('daily-view.data', 'daily-add.n_clicks', state)
+#+        self.assertEqual(len(self.service.entries), 1)
+#+        tokens = [call[-1] for call in self.service.calls if call[0] == 'add']
+#+        self.assertEqual(tokens[0], tokens[1])
+#+        reloaded = self.invoke('daily-view.data', 'daily-refresh.n_clicks')['daily-view']['data']
+#+        self.assertEqual(reloaded['manual_entries'][0]['product_type'], 'BRC')
+#+        self.assertEqual(reloaded['subscription_wins'][0]['amount'], '001.25')
+#+        reset = self.invoke('daily-product-type.value', 'daily-new.n_clicks', {('daily-new', 'n_clicks'): 1})
+#+        self.assertEqual(reset['daily-product-type']['value'], '')
+#+        self.assertIsNone(reset['daily-trade']['value'])
+#+
+#+    def test_link_confirm_missing_remove_and_revision_conflict(self):
+#+        self.service.add('2026-11-25', {'event_type': 'issuance', 'product_type': 'BRC'}, 'seed')
+#+        first = self.load()['daily-view']['data']
+#+        values = {('daily-view', 'data'): first, ('daily-entry', 'value'): '[1,1]', ('daily-trade', 'value'): 'T2'}
+#+        linked = self.invoke('daily-view.data', 'daily-link.n_clicks', values)['daily-view']['data']
+#+        self.assertEqual(self.service.entries[0]['trade_id'], 'T2')
+#+        conflict = self.invoke('daily-view.data', 'daily-link.n_clicks', {**values, ('daily-operation', 'data'): 'different-operation'})
+#+        self.assertIn('Entry changed', conflict['daily-message']['children'])
+#+        self.assertNotIn('daily-trade', conflict)
+#+        confirmed = self.invoke('daily-view.data', 'daily-confirm-missing.n_clicks', {**values, ('daily-view', 'data'): linked,
+#+                                                                                   ('daily-entry', 'value'): '[1,2]'})['daily-view']['data']
+#+        self.assertTrue(self.service.entries[0]['confirmed_missing'])
+#+        self.assertIsNone(self.service.entries[0]['trade_id'])
+#+        removed = self.invoke('daily-view.data', 'daily-remove.n_clicks', {**values, ('daily-view', 'data'): confirmed,
+#+                                                                        ('daily-entry', 'value'): '[1,3]'})
+#+        self.assertTrue(self.service.entries[0]['removed'])
+#+        self.assertEqual(removed['daily-entry']['options'], [])
+#+
+#+    def test_sessions_receive_distinct_nonce_and_poll_does_not_upgrade_selection(self):
+#+        self.assertIsNone(self.defaults['daily-operation']['data'])
+#+        first = self.load()
+#+        second = self.load()
+#+        self.assertNotEqual(first['daily-operation']['data'], second['daily-operation']['data'])
+#+        self.service.add('2026-11-25', {'event_type': 'issuance', 'product_type': 'BRC'}, 'seed')
+#+        loaded = self.load()
+#+        selected = loaded['daily-entry']['options'][0]['value']
+#+        self.service.entries[0]['revision'] = 2  # A colleague changes the entry.
+#+        polled = self.invoke('daily-view.data', 'daily-interval.n_intervals', {
+#+            ('daily-view', 'data'): loaded['daily-view']['data'],
+#+            ('daily-operation', 'data'): loaded['daily-operation']['data'], ('daily-entry', 'value'): selected})
+#+        self.assertNotEqual(polled['daily-entry']['options'][0]['value'], selected)
+#+        self.assertNotIn('value', polled['daily-entry'])
+#+        conflict = self.invoke('daily-view.data', 'daily-link.n_clicks', {
+#+            ('daily-view', 'data'): polled['daily-view']['data'], ('daily-entry', 'value'): selected,
+#+            ('daily-operation', 'data'): polled['daily-operation']['data'], ('daily-trade', 'value'): 'T2'})
+#+        self.assertIn('Entry changed', conflict['daily-message']['children'])
+#+        self.assertEqual([call for call in self.service.calls if call[0] == 'link'][-1][3], 1)
+#+
+#+    def test_failed_read_keeps_same_day_last_good_without_raw_error(self):
+#+        good = self.load()['daily-view']['data']
+#+        self.service.fail = RuntimeError('PRIVATE connection string and SQL')
+#+        response = self.invoke('daily-view.data', 'daily-refresh.n_clicks', {('daily-view', 'data'): good})
+#+        self.assertNotIn('PRIVATE', json.dumps(response))
+#+        self.assertNotIn('daily-view', response)
+#+        self.assertIn('last good', response['daily-source']['children'])
+#+        self.assertIn('500,001', json.dumps(response['daily-content']))
+#+        other = self.invoke('daily-view.data', 'daily-day.value', {('daily-view', 'data'): good, ('daily-day', 'value'): '2026-11-18'})
+#+        self.assertIsNone(other['daily-view']['data'])
+#+        self.assertNotIn('500,001', json.dumps(other['daily-content']))
+#+        self.assertNotIn('daily-product-type', other)
+#+
+#+    def test_capture_labels_reconstructed_and_provider_provisional(self):
+#+        result = self.invoke('daily-view.data', 'daily-capture.n_clicks')
+#+        self.assertIn('Reconstructed', result['daily-source']['children'])
+#+        self.assertIn('provisional', json.dumps(result['daily-content']))
+#+        self.assertIn(('capture', '2026-11-25'), self.service.calls)
+#+
+#+    def test_incomplete_source_rows_are_visible_with_unavailable_headlines(self):
+#+        original = self.service.load
+#+        def incomplete(day):
+#+            result = original(day)
+#+            result['eflow'].update(trade_count=None, volume_chf=None, pnl_chf=None)
+#+            result['voiceflow'].update(trade_count=None, provisional=True)
+#+            result['unresolved_trades'] = [{'product_id': 'P-review', 'id': None, 'reason': 'Missing RFQ/product identity'}]
+#+            result['eflow_unresolved_trades'] = [{'id': 'T-no-FX', 'product_type': 'BRC', 'currency': 'XYZ', 'amount': '100'}]
+#+            return result
+#+        self.service.load = incomplete
+#+        response = self.load()
+#+        content = json.dumps(response['daily-content'])
+#+        self.assertIn('Unavailable', content)
+#+        self.assertIn('P-review', content)
+#+        self.assertIn('Missing RFQ/product identity', content)
+#+        self.assertIn('T-no-FX', content)
+#+
+#+    def test_unconfigured_page_is_safe_and_no_service_enters_browser(self):
+#+        self.assertNotIn('_daily_service', json.dumps(self.client.get('/_dash-layout').get_json()))
+#+        settings, snapshot = fixture()
+#+        app = create_app(settings, {}, snapshot)
+#+        result = self.invoke('daily-view.data', 'location.pathname', app=app)
+#+        self.assertIn('not configured', json.dumps(result['daily-content']))
+#+
+#+    def test_actual_demo_service_http_save_capture_and_new_instance_reload(self):
+#+        from coupon_lab.daily import DailyService
+#+        with tempfile.TemporaryDirectory() as directory:
+#+            app_dir = Path(directory) / 'app'
+#+            app_dir.mkdir()
+#+            cfg = {'_root': app_dir, 'daily_reporting': {'holidays': []}}
+#+            service = DailyService(cfg, demo=True)
+#+            settings, snapshot = fixture()
+#+            settings['_daily_service'] = service
+#+            app = create_app(settings, {}, snapshot)
+#+            day = service.previous_day().isoformat()
+#+            # The first past-day view has unavailable source figures, not zero.
+#+            first = self.invoke('daily-view.data', 'location.pathname', app=app)['daily-view']['data']
+#+            self.assertIsNone(first['eflow']['request_count'])
+#+            captured = self.invoke('daily-view.data', 'daily-capture.n_clicks', app=app)['daily-view']['data']
+#+            self.assertIsNotNone(captured['eflow']['request_count'])
+#+            values = {('daily-view', 'data'): captured, ('daily-operation', 'data'): 'real-store-operation',
+#+                      ('daily-event', 'value'): 'win', ('daily-product-type', 'value'): 'Synthetic BRC',
+#+                      ('daily-currency', 'value'): 'CHF', ('daily-amount', 'value'): '250000',
+#+                      ('daily-provider', 'value'): 'Synthetic provider', ('daily-underlyings', 'value'): 'FICT SW'}
+#+            self.invoke('daily-view.data', 'daily-add.n_clicks', values, app=app)
+#+            self.invoke('daily-view.data', 'daily-add.n_clicks', values, app=app)
+#+            other = DailyService(cfg, demo=True)
+#+            self.assertEqual(len(other.load(day)['subscription_wins']), 1)
+#+            self.assertEqual(other.load(day)['subscription_wins'][0]['product_type'], 'Synthetic BRC')
+#+
+#+
+#+if __name__ == '__main__':
+#+    unittest.main()
+# FILE {"kind": "app", "name": "docs/37_DAILY_REPORTING_PILOT.txt", "new_lf": true}
+#+DAILY REPORTING | DESKTOP PILOT | 27 NOVEMBER 2026
+#+
+#+Open Reports > Daily Reporting. The default is the previous Zurich business
+#+day. Today reads SLD on open, every minute and on Refresh. Historical days
+#+read saved source figures together with the latest shared manual entries.
+#+The monthly screens continue to use the prepared run.
+#+
+#+CONFIGURATION
+#+
+#+Keep the working office connection hook, settings, references and existing
+#+output folder. The two new choices in settings.json are daily_reporting.store
+#+and daily_reporting.holidays. The store is a separate SQLite file. The
+#+relative default ../coupon_lab_reporting/daily.sqlite3 resolves beside the app
+#+folder. Point all PCs to the same shared location. The folder needs permission
+#+to create the database and its rollback journal. Use a new reporting file.
+#+The pricing database has other tables and a different owner. Configure desk
+#+holidays as an array of dates in YYYY-MM-DD format. Weekends are skipped.
+#+
+#+The Windows launcher reads latest.json in the configured monthly output
+#+folder and opens that completed run. If it cannot resolve the pointer, open
+#+the printed folder and restore the pointer and completed run together or
+#+publish a new monthly run using the existing approved preparation. Python
+#+selection supports COUPON_LAB_PYTHON on each PC, runtime.python in settings,
+#+a local Miniconda installation and PATH. For a named conda environment,
+#+set COUPON_LAB_PYTHON to that environment's python.exe. Run on each user's
+#+own machine with its approved SLD client and existing Dash environment.
+#+
+#+RECONCILE THE DAILY QUERIES AT WORK
+#+
+#+1. Use an office copy and the existing read-only SLD hook. Confirm that
+#+   the source timestamps use Zurich local time under that connection.
+#+   The read binds local midnight inclusive and next midnight exclusive.
+#+   Compare all distinct request IDs created that day with the sum of eFlow,
+#+   voiceflow and unresolved requests. Examine the Excel Profile expression.
+#+   Manual means voiceflow. A missing profile remains unresolved. Providers
+#+   and fee rows must never multiply requests or their amounts.
+#+
+#+2. Compare trades on product initial-fixing day in ACTIVE or ISSUING state.
+#+   Include requests created on a prior date. Check the RFQ/product join for
+#+   reprices, the actual product size unit, original currency, displayed
+#+   underlying basket, originating platform and executed hedge counterparty.
+#+   Inspect a selected winning TRS/DIP/PUT row against the desk's hedge,
+#+   including an internally hedged voice trade. A best price alone is
+#+   insufficient evidence of execution.
+#+
+#+3. Use the actual Excel query for the fee calculation. The input for PnL is
+#+   an annual decimal margin, notional and lifetime in years. Map the actual
+#+   PA/TOTAL fee joins, signs, annualisation and lifetime conventions. A
+#+   missing fee must leave the request, trade and original amount visible.
+#+   A single record with an independently known PnL is a good scale check.
+#+   CHF conversion uses the latest reviewed monthly rate per currency up to
+#+   the selected month. Missing amounts and missing rates leave affected totals
+#+   unavailable and eFlow threshold eligibility unresolved.
+#+
+#+4. Put office expressions in settings.json under daily_reporting.source.
+#+   Supported overrides, bind names and result aliases are documented at the
+#+   top of coupon_lab/daily_source.py, beside the default_queries function.
+#+   For instance, flow_profile_expression uses the joined product alias p.
+#+   Set profile_confirmed to true only after comparing with the workbook.
+#+   Use the reviewed provider mapping before setting provider_confirmed.
+#+   Use margin_expression, lifetime_years_expression and margin_scale for
+#+   fee-based PnL. A margin already supplied as an annual decimal uses scale
+#+   "1"; a percentage-point field uses "0.01" only if verified internally.
+#+   Alternatively supply pnl_expression for the reviewed native-currency
+#+   Excel result. Verify both the native and the CHF result. Generic pilot
+#+   settings cannot supply the missing office fee formula.
+#+
+#+5. Run a preview until the relevant figures agree. This command reads the
+#+   selected date and prints internal aggregate figures and quality indicators.
+#+   It does not save a snapshot.
+#+
+#+   python run_coupon_lab.py daily-capture --date 2026-11-26 --preview
+#+
+#+   Then click Capture this day from SLD or run the following command.
+#+
+#+   python run_coupon_lab.py daily-capture --date 2026-11-26
+#+
+#+   A first capture on a later Zurich date shows Reconstructed. Current SLD
+#+   state cannot recreate exactly what the desk knew on Thursday evening.
+#+   Save today's snapshot once near close. It records observations through
+#+   the displayed read time. Reopening a saved day or repeating the command
+#+   preserves its first SLD capture, including the rates used for its trades.
+#+
+#+MANUAL ENTRIES
+#+
+#+Choose the reporting day before entering a win, issuance or pre-hedge.
+#+A win uses commitment day and may have a provisional or blank size.
+#+An issuance uses initial-fixing day and final size. Select the corresponding
+#+SLD voice trade if present. An unmatched issuance stays pending until the
+#+desk confirms it is missing from SLD. After that confirmation it counts once
+#+in addition to the SLD population. Review possible overlaps. If its SLD trade
+#+arrives later, link the existing manual row to it. The headline then includes
+#+the linked trade once, with its detail in the subscription issuance list.
+#+Pre-hedges have their own list. Add or remove entries on any recorded day.
+#+After a stale-edit message, refresh, inspect the other user's change, then
+#+select the entry again. Original entries and revisions are retained internally.
+#+
+#+TECHNICAL REFERENCE
+#+
+#+run_coupon_lab.py handles latest-run startup and daily-capture. daily.py
+#+selects the date and live or saved source. daily_source.py queries the two
+#+day windows and calculates trade-level amounts. daily_store.py combines
+#+manual and source rows and owns SQLite transactions. ui/daily_reporting.py
+#+registers the page and its refresh and editor actions.
+#+
+#+The shared store is an application-owned schema, version 1. No change to
+#+an SLD or voice pricing table is required. UTC timestamps are retained
+#+alongside Zurich business dates.
+#+
+#+daily_meta(version) identifies the store schema.
+#+daily_snapshots(day PK, source_json, source_hash, saved_at) holds one saved
+#+    read per Zurich day. The payload includes request counts and dated trades.
+#+daily_entries(id PK, report_day, revision, removed, entry_json) holds each
+#+    manual event. The JSON includes its kind, terms and optional SLD trade ID.
+#+daily_revisions(entry_id, revision, entry_json) uses the first two columns as
+#+    its compound key and retains every manual revision, including removal.
+#+daily_retries(token PK, request_hash, result_json, created_at) makes a retry
+#+    with the same content return its committed result.
+#+
+#+For a pilot recovery copy, close all pilot apps and capture commands on both
+#+PCs before copying the SQLite file. Keep the backup outside the release
+#+directory. Restore to another filename and configure a test app to open the
+#+restored file. Confirm the saved day, one manual entry and its revision.
+#+Test this procedure and file locking on the actual shared folder.
+# FILE {"kind": "companion", "name": "FRIDAY_OFFICE_GUIDE.txt", "new_lf": true}
+#+COUPON LAB | FRIDAY OFFICE GUIDE
+#+Version daily-reporting-office-20261127-r2

@@ -1,0 +1,454 @@
+#=        # Rendering already discards stale drilldowns; use that same population
+#=        # while a changed report scope is still reaching the action callback.
+#=        signature=scope_signature(platform,month,population,filters)
+#=        if performance.get('_scope') not in (None,signature):
+#=            performance={}
+#=        dimension=get('exp-dimension') or ev.CONTROLS['exp-dimension']
+#=        scope=ew.scope_token(snapshot,platform,month,population,filters,dimension,
+#=                             performance.get('refinements') or [],analysis_filters=analysis)
+#=        state=get('exp-whatif-state','data') or {}
+#=        event,value='scope',None
+#=        trigger=ctx.triggered_id
+#=        if 'reset.n_clicks' in ctx.triggered_prop_ids or trigger=='analysis-explorer-clear':
+#=            event='reset'
+#=        elif trigger=='exp-whatif-toggle':
+#=            if not get(trigger,'n_clicks'):raise PreventUpdate
+#=            event='toggle'
+#=        elif trigger=='exp-whatif-reset':
+#=            if not get(trigger,'n_clicks'):raise PreventUpdate
+#=            event='reset'
+#=        elif isinstance(trigger,dict) and trigger.get('type')=='exp-target':
+#=            # ALL supplies an array, but target identity comes from the actual
+#=            # fired input rather than its order on the currently sorted page.
+#=            raw=next((item['value'] for group in ctx.inputs_list if isinstance(group,list)
+#=                      for item in group if item['id']==trigger),None)
+#=            event,value='target',{'segment':trigger['segment'],'value':raw}
+#=        options={'exp_metric':get('exp-metric'),'exp_dimension':dimension,'analysis_filters':analysis}
+#=        # Disabled or stale scenarios invalidate cheaply, without building hidden views.
+#=        if event=='scope':
+#=            updated=ew.transition(state,event,value,scope=scope,allowed=True)
+#=            if updated==state:raise PreventUpdate
+#=            return updated
+#=        # Toggle/reset change only scenario state. The full segment catalog is
+#=        # needed for target validation, not for these small state transitions.
+#=        # Rendering still rebuilds the actual view with the current scope.
+#=        valid=None
+#=        if event=='target':
+#=            view=ev.build_view(snapshot,platform,month,population,filters,performance,options)
+#=            valid={record['id'] for record in view['records']}
+#=        allowed=True
+#=        updated=ew.transition(state,event,value,scope=scope,allowed=allowed,
+#=                              valid_segments=valid)
+#=        if event=='target':
+#=            # Editors debounce on blur. Two fast edits can share the prior
+#=            # Store value, so reconcile the complete visible editor payload.
+#=            # Editors on other pages are absent and retain their saved targets.
+#=            for group in ctx.inputs_list:
+#=                if not isinstance(group,list):continue
+#=                for item in group:
+#=                    identifier=item.get('id')
+#=                    if isinstance(identifier,dict) and identifier.get('type')=='exp-target':
+#=                        updated=ew.transition(updated,'target',{'segment':identifier.get('segment'),'value':item.get('value')},
+#=                                              scope=scope,allowed=allowed,valid_segments=valid)
+#=        if updated==state:raise PreventUpdate
+#=        return updated
+#=
+#=    af.register_callbacks(app)
+#=    app.prototype_snapshot=snapshot
+#=    mv.register_callbacks(app,snapshot,settings,opportunity_index)
+#+    daily.register_callbacks(app,daily_service)
+#=    app.prototype_render=lambda slug,platform='PLATFORM_A',month=None,population='restricted',filters=None,local=None,options=None: render_view(
+#=        route_slug('/rfq/'+slug),platform,month or settings['default_month'],population,filters or {},local or {},local or {},
+#=        {**{key.replace('-','_'):value for key,value in control_defaults.items()},**(options or {})})
+#=    return app
+# FILE {"kind": "app", "name": "coupon_lab/ui/missed_views.py", "new_lf": true, "old_lf": true}
+#="""One Missed Opportunities page for a completed, offline RFQ snapshot.
+#=
+#=Inputs: the missed_analysis index, shared report filters and small local UI
+#=choices. Outputs: figures, selected RFQ metadata and readable evidence. No data
+#=is loaded here; source rows and outcomes are never changed. Reason/Detail menus
+#=select whole RFQs, using parent-scoped Detail IDs. Numerical quote levels never
+#=enter a browser store or this page's table payload.
+#=
+#=Run the matching synthetic checks with:
+#=    python -m unittest discover -s tests -p test_missed_views.py -v
+#="""
+#=from __future__ import annotations
+#=
+#=from copy import deepcopy
+#=from functools import cmp_to_key
+#=from math import ceil
+#=from datetime import date
+#=from decimal import Decimal
+#=from html import escape
+#=import hashlib
+#=import json
+#=
+#=from dash import ALL, Input, Output, State, ctx, dcc, html, no_update
+#=from dash.exceptions import PreventUpdate
+#=import plotly.graph_objects as go
+#=
+#=from coupon_lab.shared import metrics as m
+#=from . import charts as c, model as dm, performance as p
+#=from .analysis_filters import analysis_controls
+#=from .components import dropdown, field, formatted, graph, panel, plain_table, table
+#=from .formatting import swiss_timestamp
+#=from .navigation import report_path
+#=from .product_labels import product_label
+#=from .branding import presented, display_text
+#=from coupon_lab.brands import registry_for
+#=
+#=
+#=PAGE = 'missed-opportunity-analysis'
+#=BUSINESS_FILTERS = ('product', 'currency', 'callability', 'barrier', 'conditional_coupon', 'capped',
+#=                    'region', 'basket', 'ticket_size', 'underlying', 'outcome')
+#=CONTROL_DEFAULTS = {'mm-metric': 'chf', 'mm-dimension': 'underlying', 'mm-case-search': ''}
+#=CONTROLS = CONTROL_DEFAULTS
+#=CHART_IDS = ('mm-reasons', 'mm-details', 'mm-breakdown', 'mm-history', 'mm-timeline')
+#=CLICK_CHARTS = ('mm-reasons', 'mm-details')
+#=CLICK_TABLES = ()
+#=EMPTY_QUERY = {'include_reasons': [], 'exclude_reasons': [],
+#=               'include_details': [], 'exclude_details': []}
+#=DIMENSIONS = {key: label for key, label in p.DIMENSIONS.items() if key != 'capped'}
+#=DIMENSIONS['underlying'] = 'Individual underlying'
+#=DETAIL_PAGE_SIZE = 50
+#=CASE_PAGE_SIZE = 16
+#=CASE_SPECS = [('rfq', 'Simulation ID', 'text'), ('product', 'Product', 'text'),
+#=              ('amount', 'Requested CHF', 'money'), ('currency', 'Currency', 'text'),
+#=              ('reasons', 'Reasons', 'text')]
+#=UPDATE_KEYS = (
+#=    'mm-kpis.children', 'mm-reason-menu.children', 'mm-reasons.figure',
+#=    'mm-details.figure', 'mm-detail-title.children', 'mm-breakdown.figure',
+#=    'mm-breakdown-note.children', 'mm-history.figure', 'mm-history-title.children',
+#=    'mm-case-table.data', 'mm-case-count.children', 'mm-case-detail.children',
+#=    'mm-print-context.children', 'mm-population-note.children',
+#=    'mm-timeline.figure', 'mm-timeline-title.children', 'mm-timeline-note.children',
+#=    'mm-timeline-back.style', 'mm-case-table.page_count',
+#=    'mm-detail-page-label.children', 'mm-detail-previous.disabled', 'mm-detail-next.disabled',
+#=)
+#=
+#=
+#=def _engine():
+#=    from coupon_lab import missed_analysis
+#=    return missed_analysis
+#=
+#=
+#=def _option(options, name):
+#=    return (options or {}).get(name.replace('-', '_'), CONTROL_DEFAULTS[name])
+#=
+#=
+#=def _query(state, index=None):
+#=    """Resolve compact bulk intentions only on the server, never into stores."""
+#=    raw = (state or {}).get('query') or {}
+#=    result = {name: list(dict.fromkeys(raw.get(name) or [])) for name in EMPTY_QUERY}
+#=    if index is None:
+#=        return result
+#=    bulk = (state or {}).get('bulk') or {}
+#=    scopes = [('reasons', '', bulk.get('reasons'), list(index['reasons']))]
+#=    scopes += [('details', parent, choice, list(index.get('detail_catalog', {}).get(parent, {})) or
+#=                [token for token, item in index['details'].items() if item['reason'] == parent])
+#=               for parent, choice in (bulk.get('details') or {}).items() if parent in index['reasons']]
+#=    for suffix, parent, choice, tokens in scopes:
+#=        if not isinstance(choice, dict) or choice.get('mode') not in {'include', 'exclude'}:
+#=            continue
+#=        mode = choice['mode']
+#=        omitted = set(choice.get('exceptions') or [])
+#=        opposite = set(result[('exclude' if mode == 'include' else 'include') + '_' + suffix])
+#=        implicit = [token for token in tokens if token not in omitted and token not in opposite]
+#=        result[mode + '_' + suffix] = list(dict.fromkeys(result[mode + '_' + suffix] + implicit))
+#=    return result
+#=
+#=
+#=def _breakdown_selection(state):
+#=    selection = (state or {}).get('breakdown')
+#=    if not isinstance(selection, dict):
+#=        return None
+#=    dimension, category = selection.get('dimension'), selection.get('category')
+#=    if isinstance(dimension, str) and dimension in DIMENSIONS and isinstance(category, str) and category:
+# COPY BLOCK 6
+#=        return selection
+#=    return None
+#=
+#=
+#=def for_breakdown_dimension(state, dimension):
+#=    state = state or {}
+#=    selection = _breakdown_selection(state)
+#=    if selection and selection['dimension'] != dimension:
+#=        return {key: value for key, value in state.items() if key != 'breakdown'}
+#=    return state
+#=
+#=
+#=def _compact(state):
+#=    """Use one human-readable chip per all-selection, including exceptions."""
+#=    return state if isinstance(state, dict) and any(key in state for key in ('query', 'bulk', 'breakdown')) else {'query': state or {}}
+#=
+#=
+#=def _bulk_choice(state, kind, parent=''):
+#=    bulk = (state or {}).get('bulk') or {}
+#=    return bulk.get('reasons') if kind == 'reason' else (bulk.get('details') or {}).get(parent)
+#=
+#=
+#=def _bulk_button(scope, mode, label=None, disabled=False):
+#=    return html.Button(label or ('Include all' if mode == 'include' else 'Exclude all'),
+#=        id='mm-all-' + scope + '-' + mode, n_clicks=0, disabled=disabled,
+#=        className='mm-filter-button ' + mode,
+#=        **{'aria-label': mode.title() + ' all ' + ('Reasons' if scope == 'reasons' else 'Details for the open Reason')})
+#=
+#=
+#=def _page(records, page, size):
+#=    count = len(records)
+#=    pages = max(1, ceil(count / size))
+#=    page = min(max(int(page or 0), 0), pages - 1)
+#=    return records[page * size:(page + 1) * size], page, pages, count
+#=
+#=
+#=def _number(value):
+#=    return float(value) if value is not None else None
+#=
+#=
+#=def _month_before(month):
+#=    current = date.fromisoformat(month + '-01')
+#=    return f'{current.year - 1}-12' if current.month == 1 else f'{current.year}-{current.month - 1:02d}'
+#=
+#=
+#=def _amount(index, keys):
+#=    amounts = [index['entries'][key]['row'].get('notional_chf') for key in keys]
+#=    return None if any(value is None for value in amounts) else sum(amounts, Decimal(0))
+#=
+#=
+#=def _metrics(index, selected, baseline, *, available=True):
+#=    if not available:
+#=        return {'selected_missed_chf': None, 'selected_missed_rfqs': None,
+#=                'selected_share_missed_chf': None}
+#=    amount, base_amount = _amount(index, selected), _amount(index, baseline)
+#=    return {'selected_missed_chf': amount, 'selected_missed_rfqs': len(selected),
+#=            'selected_share_missed_chf': amount / base_amount
+#=            if amount is not None and base_amount is not None and base_amount > 0 else None}
+#=
+#=
+#=def ytd_metrics(index, selected_keys, baseline_keys, month, covered_months):
+#=    """Use January through the selected month, keeping the same RFQ selections.
+#=
+#=    Only covered months contribute. Missing months are flagged in the label so
+#=    partial-year totals cannot appear complete. Recompute the share from summed
+#=    CHF; averaging monthly percentages would give small months too much weight.
+#=    """
+#=    expected=[f'{month[:4]}-{number:02d}' for number in range(1,int(month[-2:])+1)]
+#=    available=set(expected).intersection(covered_months)
+#=    missing=[period for period in expected if period not in available]
+#=    def in_period(keys):
+#=        return [key for key in dict.fromkeys(keys)
+#=                if index['entries'][key]['row'].get('month') in available]
+#=    label='YTD Jan–'+date.fromisoformat(month+'-01').strftime('%b %Y')
+#=    if missing:
+#=        label+=' · incomplete coverage'
+#=    return {'metrics':_metrics(index,in_period(selected_keys),in_period(baseline_keys),
+#=                              available=bool(available)),
+#=            'label':label,'missing_months':missing}
+#=
+#=
+#=def _cards(current, previous, ytd=None, ytd_label='YTD', *, specs=None):
+#=    specs = specs or [('selected_missed_chf', 'Selected missed volume', 'money'),
+#=             ('selected_missed_rfqs', 'Selected missed RFQs', 'count'),
+#=             ('selected_share_missed_chf', 'Share of baseline missed CHF', 'rate')]
+#=    cards = []
+#=    for name, label, kind in specs:
+#=        prior = previous.get(name) if previous is not None else None
+#=        cards.append(html.Div([
+#=            html.Span(label, className='mm-score-label'),
+#=            html.Strong(formatted(current[name], kind), className='mm-score-current'),
+#=            html.Span('Prev ' + formatted(prior, kind), className='mm-score-previous',
+#=                      title='Previous calendar month under the same selections'),
+#=            html.Div([
+#=                html.Span(ytd_label),
+#=                html.Strong(formatted((ytd or {}).get(name), kind)),
+#=            ], className='mm-score-ytd', title=ytd_label),
+#=        ], className='mm-score-metric', **{'data-metric': name}))
+#=    return cards
+#=
+#=
+#=def _initial_menu_controls():
+#=    """Keep fixed callback inputs in the initial layout without building a catalog.
+#=
+#=    Dash validates fixed IDs before the first callback can populate this menu.
+#=    These disabled placeholders are replaced by the bounded actual menu when
+#=    the Missed workspace is rendered. Pattern-matching inputs may remain empty.
+#=    """
+#=    return [html.Div([_bulk_button(scope, mode, disabled=True)
+#=                for scope in ('reasons', 'details') for mode in ('include', 'exclude')],
+#=                className='mm-menu-bulk'),
+#=            html.Label('Search this Reason’s Details', htmlFor='mm-menu-search', className='mm-menu-search-label'),
+#=            dcc.Input(id='mm-menu-search', type='search', value='', disabled=True,
+#=                      placeholder='Choose a Reason', className='mm-menu-search'),
+#=            html.Div([html.Button('Previous', id='mm-menu-previous', n_clicks=0,
+#=                                 disabled=True, className='button quiet'),
+#=                      html.Button('Next', id='mm-menu-next', n_clicks=0,
+#=                                  disabled=True, className='button quiet')], className='mm-pagination')]
+#=
+#=
+#=@presented
+#=def layouts(snapshot, settings):
+#=    """Build the single page; source data stays in the server-side index."""
+#=    cases = table('mm-case-table', CASE_SPECS, 16, False, compact=True)
+#=    cases.children.sort_action = 'custom'
+#=    cases.children.page_action = 'custom'
+#=    cases.children.page_count = 1
+#=    cases.children.sort_by = []
+#=    cases.children.tooltip_header = {item[0]: item[1] for item in CASE_SPECS}
+#=    return [html.Div([
+#=        dcc.Store(id='missed-state', data={}),
+#=        analysis_controls('missed', settings),
+#=        html.Div([
+#=            html.Div(id='mm-kpis', className='mm-scorecard', role='group',
+#=                     **{'aria-label': 'Population and selected missed opportunity metrics'}),
+#=            html.Section([
+#=                # Keep chart context available to assistive technology and the
+#=                # existing drilldown callback without a visible heading row.
+#=                html.Span(id='mm-timeline-title', hidden=True),
+#=                html.Button('Back to month', id='mm-timeline-back', n_clicks=0,
+#=                    className='mm-timeline-back', style={'display': 'none'}),
+#=                html.Div([graph('mm-timeline', 135),
+#=                    html.Div(id='mm-timeline-note', className='mm-note')], className='panel-body'),
+#=            ], className='panel mm-timeline-panel',
+#=                **{'aria-label': 'Missed opportunity activity', 'aria-describedby': 'mm-timeline-title'}),
+#=        ], className='mm-top-grid'),
+#=        html.Div(id='mm-population-note', className='mm-population-note'),
+#=        html.Div([
+#=            panel('Reasons', [
+#=                html.Div(graph('mm-reasons', 320), className='mm-chart-scroll'),
+#=            ], toolbar=html.Div([
+#=                field('Measure', dropdown('mm-metric', [
+#=                    {'label': 'Missed RFQs', 'value': 'count'},
+#=                    {'label': 'Requested CHF', 'value': 'chf'}], CONTROL_DEFAULTS['mm-metric']), local=True),
+#=                html.Details([html.Summary('Filter Reasons / Details'),
+#=                    html.Div(_initial_menu_controls(), id='mm-reason-menu', className='mm-menu-list')],
+#=                    id='mm-reason-dropdown', className='mm-dropdown mm-unified-dropdown'),
+#=            ], className='mm-reason-controls'),
+#=                subtitle='Recorded memberships overlap; Reason amounts are not additive.',
+#=                class_name='panel mm-reasons-panel'),
+#=            panel(html.Span('Details', id='mm-detail-title'), [
+#=                html.Div([html.Label('Search Details', htmlFor='mm-detail-search'),
+#=                    dcc.Input(id='mm-detail-search', type='search', value='', debounce=True,
+#=                              placeholder='Search recorded Detail labels…')], className='mm-detail-search'),
+#=                html.Div(graph('mm-details', 320), className='mm-chart-scroll'),
+#=                html.Div([html.Button('Previous', id='mm-detail-previous', n_clicks=0, className='button quiet'),
+#=                    html.Span(id='mm-detail-page-label'),
+#=                    html.Button('Next', id='mm-detail-next', n_clicks=0, className='button quiet')], className='mm-pagination'),
+#=            ]),
+#=        ], className='mm-reason-grid'),
+#=        html.Div([
+#=            panel('Breakdown of selected misses', [
+#=                html.Div(graph('mm-breakdown', 270), className='mm-breakdown-scroll'),
+#=                html.Div(id='mm-breakdown-note', className='mm-note'),
+#=            ], toolbar=field('Break down by', dropdown('mm-dimension', [
+#=                {'label': label, 'value': key} for key, label in DIMENSIONS.items()],
+#=                'underlying'), local=True)),
+#=            panel(html.Span('Selected misses through time', id='mm-history-title'), [
+#=                graph('mm-history', 270),
+#=            ]),
+#=        ], className='mm-lower-grid'),
+#=        html.Details([
+#=            html.Summary([html.Strong('Matching RFQs'), html.Span(id='mm-case-count', className='mm-muted')]),
+#=            html.Div([
+#=                html.Div([html.Label('Search this list', htmlFor='mm-case-search'), dcc.Input(id='mm-case-search',
+#=                    value='', type='search', debounce=True,
+#=                    placeholder='Simulation ID, product, currency or underlying…')], className='mm-search'),
+#=            ], className='mm-case-toolbar'),
+#=            cases,
+#=            html.Div(id='mm-case-detail', className='mm-case-detail'),
+#=        ], id='mm-rfq-section', open=False, className='mm-rfq-section'),
+#=        html.Div(id='mm-print-context', className='mm-print-context'),
+#=    ], id='page-' + PAGE, className='mm-page', style={'display': 'none'})]
+#=
+#=
+#=def _filter_button(kind, reason, detail, mode, selected=False, disabled=False, label=None):
+#=    return html.Button('Include' if mode == 'include' else 'Exclude',
+#=        id={'type': 'mm-filter', 'kind': kind, 'reason': reason,
+#=            'detail': detail, 'mode': mode}, n_clicks=0,
+#=        className='mm-filter-button ' + mode + (' selected' if selected else ''), disabled=disabled,
+#=        **{'aria-pressed': 'true' if selected else 'false', 'aria-disabled': 'true' if disabled else 'false',
+#=           'aria-label': mode.title() + ' ' + (label or reason)})
+#=
+#=
+#=def _menu_row(label, kind, reason, detail, query, *, inherited=False):
+#=    value = reason if kind == 'reason' else detail
+#=    suffix = 'reasons' if kind == 'reason' else 'details'
+#=    return html.Div([
+#=        html.Span(label, className='mm-menu-label', title=label),
+#=        html.Div([_filter_button(kind, reason, detail, mode,
+#=                                inherited and mode == 'exclude' or value in query[mode + '_' + suffix],
+#=                                disabled=inherited, label=label)
+#=                  for mode in ('include', 'exclude')], className='mm-menu-actions'),
+#=    ], className='mm-menu-row' + (' mm-inherited-exclusion' if inherited else ''))
+#=
+#=
+#=def _active_menu_reason(index, state):
+#=    active = state.get('menu_reason') or state.get('reason')
+#=    if active in index['reasons']: return active
+#=    reasons = sorted(index['reasons'].values(), key=lambda item: (item['label'].casefold(), item['id']))
+#=    return reasons[0]['id'] if reasons else None
+#=
+#=
+#=def filter_menus(index, query, state=None):
+#=    """Only the open parent's 50 controls enter the browser payload."""
+#=    state = state or {}
+#=    reasons = sorted(index['reasons'].values(), key=lambda item: (item['label'].casefold(), item['id']))
+#=    active = _active_menu_reason(index, state)
+#=    parents = []
+#=    for reason in reasons:
+#=        excluded = reason['id'] in query['exclude_reasons']
+#=        parents.append(html.Div([html.Div([
+#=            html.Button([html.Span(reason['label']), html.Span('›', className='mm-menu-arrow')],
+#=                id={'type': 'mm-open-reason', 'reason': reason['id']}, n_clicks=0,
+#=                className='mm-parent-label', title=reason['label'],
+#=                **{'aria-pressed': str(active == reason['id']).lower(), 'aria-label': 'Show Details for ' + reason['label']}),
+#=            html.Div([_filter_button('reason', reason['id'], '', mode,
+#=                reason['id'] in query[mode + '_reasons'], label=reason['label']) for mode in ('include', 'exclude')],
+#=                className='mm-menu-actions')], className='mm-parent-row')],
+#=            className='mm-menu-parent' + (' mm-submenu-open' if active == reason['id'] else '') +
+#=                (' is-excluded' if excluded else ''), **{'data-mm-reason': reason['id']}))
+#=    brand_registry = registry_for(index.get('snapshot'))
+#=    search = str(state.get('menu_search') or '').strip().casefold()
+#=    details = sorted((item for item in index['details'].values() if item['reason'] == active and
+#=                      (not search or search in display_text(item['label'], brand_registry).casefold())),
+#=                     key=lambda item: (item['label'].casefold(), item['id']))
+#=    visible, page, pages, count = _page(details, state.get('menu_page'), DETAIL_PAGE_SIZE)
+#=    excluded = active in query['exclude_reasons']
+#=    child = [html.Div(index['reasons'][active]['label'] if active else 'Details', className='mm-submenu-title'),
+#=        *([html.Div('Excluded with Reason', className='mm-menu-inherited')] if excluded else []),
+#=        html.Div([_bulk_button('details', mode, disabled=excluded) for mode in ('include', 'exclude')], className='mm-menu-bulk'),
+#=        html.Label('Search this Reason’s Details', htmlFor='mm-menu-search', className='mm-menu-search-label'),
+#=        dcc.Input(id='mm-menu-search', type='search', value=state.get('menu_search') or '', debounce=True,
+#=                  placeholder='Search every Detail…', className='mm-menu-search'),
+#=        *[_menu_row(item['label'], 'detail', active, item['id'], query, inherited=excluded) for item in visible],
+#=        *([] if visible else [html.Div('No matching Details', className='mm-menu-empty')]),
+#=        html.Div([html.Button('Previous', id='mm-menu-previous', n_clicks=0, disabled=page == 0, className='button quiet'),
+#=            html.Span(f'{page * DETAIL_PAGE_SIZE + 1 if count else 0}–{min((page + 1) * DETAIL_PAGE_SIZE, count)} of {count:,}'),
+#=            html.Button('Next', id='mm-menu-next', n_clicks=0, disabled=page + 1 >= pages, className='button quiet')],
+#=            className='mm-pagination')]
+#=    return [html.Div([_bulk_button('reasons', mode) for mode in ('include', 'exclude')], className='mm-menu-bulk mm-reason-bulk'),
+#=        html.Div(parents, className='mm-hierarchy-parents'), html.Div(child, className='mm-submenu-global')]
+#=
+#=
+#=def _path(index, group, token):
+#=    if group.endswith('reasons'):
+#=        return index['reasons'].get(token, {}).get('label', token)
+#=    detail = index['details'].get(token, {})
+#=    reason = index['reasons'].get(detail.get('reason'), {})
+#=    return reason.get('label', 'Unknown Reason') + ' → ' + detail.get('label', 'Unknown Detail')
+#=
+#=
+#=def _filter_chip(label, mode, group, token, removable, *, breakdown=False):
+#=    children = [html.Span(label, className='raw-source-evidence' if breakdown else None)]
+#=    if removable:
+#=        action = 'Remove breakdown filter' if breakdown else 'Remove ' + label
+#=        children.append(html.Button('×', id={'type': 'mm-remove', 'group': group, 'token': token},
+#=                                    n_clicks=0, title=action, **{'aria-label': action}))
+#=    return html.Span(children, className='mm-filter-chip ' + mode)
+#=
+#=
+#=def active_filters(index, query, *, removable=True):
+#=    state = _compact(query)
+#=    raw = _query(state)
+#=    output = []
+#=    for group, tokens in raw.items():

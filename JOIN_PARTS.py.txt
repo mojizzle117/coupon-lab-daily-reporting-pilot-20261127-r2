@@ -1,0 +1,114 @@
+"""Join the 20 small text files for the unchanged Friday office pilot r2.
+
+Save as JOIN_PARTS.py.txt beside PART_01.txt through PART_20.txt.
+Run: python JOIN_PARTS.py.txt
+Python standard library only. This creates the checked installer; it does
+not install or change the app. Follow the printed --guide command next.
+"""
+
+import hashlib
+from pathlib import Path
+import sys
+
+
+FULL_SHA256 = "4829bac621e1d761496923d39d0b8505e259075a09d71ded4d9cc217702aaa57"
+# Each part's exact hash and expected trailing whitespace are frozen from the
+# original installer. Restore that tail after ordinary copy/paste differences.
+PARTS = (
+    ('PART_01.txt', '68dea4d43e8baecd810d4ce1ca2743ff139f17e5011c99737ebfada0637e5fde', '\n'),
+    ('PART_02.txt', '526f7d25a1d32c6a10aa7a2cd2b5c2589d9c40abf531e723e9ca19d8557a575c', '\n'),
+    ('PART_03.txt', '4b929c3b18408c087dc5ef23932b7223dd0ff914351b9523737f905f38f959db', '\n'),
+    ('PART_04.txt', 'c4b8c850e525bbbd2ec5be0b23f46ad6717c2ce4ca96b342082029fff819da3d', '\n'),
+    ('PART_05.txt', '5e22244fd13a7cc0d404df5323f4b1076176652c49bf2846bf85a8b67705b3af', '\n'),
+    ('PART_06.txt', '2fad61e3f774ff2599a001052f12cfe36c03855f806428306d392dfd9ebbe553', '\n'),
+    ('PART_07.txt', '9358be0b0b1c9f40a6a7937f7bd59abfcda164a785450ca7ad7762810e79be59', '\n'),
+    ('PART_08.txt', '3a704b6c90a14ea18c9d256d36c26be5867740535bf50215f00722a8113e3ef5', '\n'),
+    ('PART_09.txt', '1a43b503118ccae21250f1082bac69ea09735a173a21c608bdd9ada802d9a529', '\n'),
+    ('PART_10.txt', '77f710af232f107e3610b59609d329ed820b553d8733717deb72f9b782d7f93a', '\n'),
+    ('PART_11.txt', '5ff58b580fa0a24b841dce71416fbea2709f00ed24d0ce1a22f644768dc5000e', '\n'),
+    ('PART_12.txt', '52231af886db0e3ed11331564e97eed6c7e494d102f5f984ba0c7307d13e0659', '\n'),
+    ('PART_13.txt', 'd9f23293dffd10dceeb88b2ef4f7b53e62deeb8bc90fd8ec96ddaf46d106a385', '\n'),
+    ('PART_14.txt', 'f1f1ad0bde5d92e11b1a36d037a4ddf3d716eb773122c8561d188ebb6c89aca4', '\n'),
+    ('PART_15.txt', '6db8c5ef1bd8db081a40e38b351916e1e02063b3ca08c153b293864e446e8361', '\n'),
+    ('PART_16.txt', '3270e082999f8416822524a6473965481172c4a07c508aec2efe61d82ed4108e', '\n'),
+    ('PART_17.txt', '9fde3a335774de5d6b2a5e82477b0628f828382aca07bf91fafc3c6bbb3e0c1e', '\n'),
+    ('PART_18.txt', '7a2c710392996c9a4b923e9ebf12f6e97abb5000de69b4bd40cb765d71112e14', '\n'),
+    ('PART_19.txt', '74a4e9d3859b8d56abf96d7d722e386ceec94eea1af45aacbefb7a8fe4b27e4c', '\n'),
+    ('PART_20.txt', 'a679d290e72d80ec44627a18a36c3f1e41dbe39508d60b6b3114d8eed443d8c2', '\n'),
+)
+
+
+class JoinError(Exception):
+    pass
+
+
+def sha256(content):
+    return hashlib.sha256(content).hexdigest()
+
+
+def canonical_part(directory, name, expected_hash, tail):
+    path = directory / name
+    if not path.is_file():
+        raise JoinError(name + ": missing. Open its Raw link, copy all text into a separate UTF-8 file with this exact name, and retry.")
+    try:
+        text = path.read_bytes().decode("utf-8-sig")
+    except (OSError, UnicodeError):
+        raise JoinError(name + ": cannot read UTF-8 text. Repaste that part into a plain-text UTF-8 file and retry.") from None
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    core = text.rstrip(" \t\n")
+    content = (core + tail).encode("utf-8")
+    if sha256(content) != expected_hash:
+        for other_name, other_hash, other_tail in PARTS:
+            if other_name != name and sha256((core + other_tail).encode("utf-8")) == other_hash:
+                raise JoinError(name + ": contains " + other_name + " instead. Repaste the correct " + name + " from its Raw link and retry.")
+        raise JoinError(name + ": incomplete or changed. Repaste the entire correct part from its Raw link into this file and retry.")
+    return content
+
+
+def existing_output_matches(path):
+    try:
+        if sha256(path.read_bytes()) == FULL_SHA256:
+            print("Already verified COPY_ME_FIRST.py.txt; kept unchanged.")
+            return True
+    except OSError:
+        pass
+    raise JoinError("COPY_ME_FIRST.py.txt: an existing file differs or cannot be read. It was kept unchanged. Keep your copy and assemble this kit in a fresh folder.")
+
+
+def main():
+    directory = Path(__file__).resolve().parent
+    assembled = b"".join(canonical_part(directory, name, digest, tail)
+                         for name, digest, tail in PARTS)
+    if sha256(assembled) != FULL_SHA256:
+        raise JoinError("Complete installer hash differs. Repaste JOIN_PARTS.py.txt and all 20 correctly named parts from the same kit, then retry in a fresh folder.")
+    output = directory / "COPY_ME_FIRST.py.txt"
+    if output.exists():
+        existing_output_matches(output)
+    else:
+        created = False
+        try:
+            with output.open("xb") as handle:
+                created = True
+                handle.write(assembled)
+        except FileExistsError:
+            existing_output_matches(output)
+        except OSError:
+            if created:
+                try:
+                    output.unlink()
+                except OSError:
+                    pass
+            raise JoinError("COPY_ME_FIRST.py.txt: could not save the complete installer. Check folder write permission and retry in a fresh writable folder.") from None
+        else:
+            print("Created and verified COPY_ME_FIRST.py.txt from all 20 parts.")
+    print("Next, run in this folder:")
+    print("python COPY_ME_FIRST.py.txt --guide")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except JoinError as error:
+        print("Assembly stopped. " + str(error), file=sys.stderr)
+        raise SystemExit(1)

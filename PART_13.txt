@@ -1,0 +1,458 @@
+#+            # Validate the complete enrichment before using any of its rows.
+#+            # No further cohort query depends on this optional read succeeding.
+#+            _provider_index(providers)
+#+        except PipelineError as error:
+#+            providers = []
+#+            provider_error = str(error)
+#+    result = _calculate(cfg, day, requests, trades, providers, fx)
+#+    result["coverage"].update({"fx_reference_available": fx_error is None,
+#+                               "hedge_enrichment_available": provider_error is None})
+#+    if fx_error:
+#+        result["warnings"].append("FX reference unavailable. CHF identity is retained; non-CHF conversions remain unresolved. " + fx_error)
+#+    if provider_error:
+#+        result["warnings"].append("Selected-option hedge enrichment unavailable. Request counts and trade amounts are retained; affected providers remain unknown. " + provider_error)
+#+    result.update({"read_at": datetime.now(timezone.utc).isoformat(), "source_as_of": None,
+#+                   "mode": "office", "window": {"start": start.replace(tzinfo=_zurich()).isoformat(),
+#+                   "end": end.replace(tzinfo=_zurich()).isoformat(), "timezone": "Europe/Zurich"}})
+#+    return result
+#+
+#+
+#+def demo_day(day):
+#+    """Return wholly fictional, date-aware SLD-shaped output without a reader."""
+#+    day = _report_date(day)
+#+    requests = [{"RFQ_ID": f"DEMO-{day.isoformat()}-{index}", "REQUEST_CREATED_AT": day,
+#+                 "FLOW_PROFILE": profile} for index, profile in enumerate(("Platform A", "Manual", None), 1)]
+#+    trades = []
+#+    for index, profile, amount, currency in ((1, "Platform A", "500000", "CHF"),
+#+                                            (2, "Platform A", "500001", "CHF"),
+#+                                            (3, "Manual", "750000", "EUR"),
+#+                                            (4, None, "100000", "JPY")):
+#+        trades.append({"RFQ_ID": f"DEMO-TRADE-{day.isoformat()}-{index}", "PRODUCT_ID": f"DEMO-P-{index}",
+#+                       "PRODUCT_STATE": "ACTIVE", "INITIAL_FIXING": day,
+#+                       "FLOW_PROFILE": profile, "PRODUCT_TYPE": "Barrier Reverse Convertible",
+#+                       "AMOUNT": amount, "CURRENCY": currency, "UNDERLYINGS": "FICTIONAL A / FICTIONAL B",
+#+                       "PLATFORM": "Fictional platform", "MARGIN_PA": "1", "LIFETIME_YEARS": "1.5"})
+#+    fx = {"CHF": {"rate": Decimal(1), "month": None, "source": "CHF identity"},
+#+          "EUR": {"rate": Decimal("0.95"), "month": day.strftime("%Y-%m"), "source": "Fictional demo"}}
+#+    cfg = {"daily_reporting": {"source": {"profile_confirmed": True, "margin_scale": "0.01"}}}
+#+    result = _calculate(cfg, day, requests, trades, [], fx)
+#+    result.update({"read_at": datetime.now(timezone.utc).isoformat(), "source_as_of": None,
+#+                   "mode": "demo", "window": {"start": datetime.combine(day, datetime.min.time(), _zurich()).isoformat(),
+#+                   "end": datetime.combine(day + timedelta(days=1), datetime.min.time(), _zurich()).isoformat(),
+#+                   "timezone": "Europe/Zurich"}})
+#+    result["warnings"].insert(0, "Entirely fictional demonstration data; amounts, margins and FX are invented.")
+#+    return result
+# FILE {"kind": "app", "name": "coupon_lab/daily_store.py", "new_lf": true}
+#+"""Shared Daily Reporting state and selected-day report composition.
+#+
+#+Use a separate, configured SQLite file for application-owned state. The source
+#+reader remains outside this module and outside write transactions. capture()
+#+stores one immutable SLD result per day. load() combines that saved result (or
+#+an explicitly supplied live result) with the latest committed manual entries.
+#+
+#+Writes use a short BEGIN IMMEDIATE transaction, expected revisions and durable
+#+retry outcomes. SQLite rollback journaling is required. No WAL is enabled.
+#+Filesystem locking, two-PC access and backup/restore still need office testing.
+#+All money is decimal text. No office connection or database driver is loaded.
+#+"""
+#+from __future__ import annotations
+#+
+#+from contextlib import contextmanager
+#+from datetime import date, datetime, timezone
+#+from decimal import Decimal, InvalidOperation, localcontext
+#+import hashlib
+#+import json
+#+from pathlib import Path
+#+import sqlite3
+#+import uuid
+#+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+#+
+#+
+#+class DailyStoreError(RuntimeError):
+#+    """An authored diagnostic that can be displayed without raw database errors."""
+#+
+#+    safe_message = True
+#+
+#+    def __init__(self, code, message):
+#+        self.code = code
+#+        super().__init__("Daily Reporting / " + code + ". " + message)
+#+
+#+
+#+def _fail(code, message):
+#+    raise DailyStoreError(code, message)
+#+
+#+
+#+def _day(value):
+#+    try:
+#+        if not isinstance(value, str) or date.fromisoformat(value).isoformat() != value:
+#+            raise ValueError()
+#+    except (ValueError, TypeError):
+#+        _fail("validation", "Use a report day in YYYY-MM-DD format.")
+#+    return value
+#+
+#+
+#+def _now():
+#+    return datetime.now(timezone.utc).isoformat()
+#+
+#+
+#+def _json(value):
+#+    try:
+#+        return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+#+    except (ValueError, TypeError, OverflowError):
+#+        _fail("validation", "Use the documented fields, JSON values and exact decimal text.")
+#+
+#+
+#+def _hash(text):
+#+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+#+
+#+
+#+def _decimal(value, *, optional=True, nonnegative=False):
+#+    if optional and value in (None, ""):
+#+        return None
+#+    try:
+#+        if not isinstance(value, str) or not value.strip():
+#+            raise ValueError()
+#+        number = Decimal(value)
+#+        if not number.is_finite() or nonnegative and number < 0:
+# COPY BLOCK 17
+#+            raise ValueError()
+#+    except (InvalidOperation, ValueError):
+#+        _fail("validation", "Enter amounts as finite decimal text, with a dot and no thousands separators.")
+#+    return value
+#+
+#+
+#+def _text(value, maximum=1000):
+#+    if not isinstance(value, str) or len(value) > maximum or "\x00" in value:
+#+        _fail("validation", "Check text fields and their documented length limits.")
+#+    return value
+#+
+#+
+#+def _confirmation(entry):
+#+    if entry["event_type"] == "issuance" and entry["confirmed_missing"]:
+#+        if not entry.get("currency") or entry.get("amount") in (None, "") or Decimal(entry["amount"]) <= 0:
+#+            _fail("validation", "A confirmed missing-SLD issuance needs its positive final amount and currency before it counts.")
+#+
+#+
+#+def _values(values):
+#+    allowed = {"event_type", "product_type", "currency", "provider", "amount", "underlyings", "trade_id", "confirmed_missing"}
+#+    if not isinstance(values, dict) or set(values) - allowed:
+#+        _fail("validation", "Use only the documented manual-entry fields.")
+#+    event = values.get("event_type")
+#+    if not isinstance(event, str) or event not in {"win", "issuance", "pre_hedge"}:
+#+        _fail("validation", "Choose win, issuance or pre_hedge as the event type.")
+#+    result = {"event_type": event}
+#+    for field in ("product_type", "provider", "underlyings"):
+#+        result[field] = _text(values.get(field, ""))
+#+    if not result["product_type"].strip():
+#+        _fail("validation", "Enter a product type before saving a manual event.")
+#+    currency = _text(values.get("currency", ""), 3).upper()
+#+    if currency and (len(currency) != 3 or not currency.isascii() or not currency.isalpha()):
+#+        _fail("validation", "Use a three-letter currency code or leave the unknown currency blank.")
+#+    result["currency"] = currency
+#+    result["amount"] = _decimal(values.get("amount"), nonnegative=True)
+#+    trade_id = values.get("trade_id")
+#+    result["trade_id"] = _text(trade_id, 512) if trade_id not in (None, "") else None
+#+    result["confirmed_missing"] = values.get("confirmed_missing", False)
+#+    if not isinstance(result["confirmed_missing"], bool):
+#+        _fail("validation", "The missing-SLD confirmation must be true or false.")
+#+    if event != "issuance" and (result["trade_id"] or result["confirmed_missing"]):
+#+        _fail("validation", "SLD trade linking and missing-SLD confirmation apply to issuance entries.")
+#+    _confirmation(result)
+#+    return result
+#+
+#+
+#+def _source(source, day=None):
+#+    if not isinstance(source, dict):
+#+        _fail("validation", "Supply a complete selected-day source result.")
+#+    selected = _day(source.get("day"))
+#+    if day is not None and selected != day:
+#+        _fail("validation", "The source result and selected report day differ.")
+#+    try:
+#+        if not isinstance(source.get("read_at"), str):
+#+            raise ValueError()
+#+        datetime.fromisoformat(source["read_at"].replace("Z", "+00:00"))
+#+    except ValueError:
+#+        _fail("validation", "The source result needs an ISO read_at timestamp.")
+#+    requests = source.get("requests")
+#+    if not isinstance(requests, dict) or not {"eflow", "voiceflow", "unknown"} <= requests.keys():
+#+        _fail("validation", "The source result needs request counts by flow.")
+#+    for flow in ("eflow", "voiceflow", "unknown"):
+#+        count = requests.get(flow)
+#+        if count is not None and (type(count) is not int or count < 0):
+#+            _fail("validation", "Source request counts must be nonnegative integers or unavailable.")
+#+    if not isinstance(source.get("trades"), list):
+#+        _fail("validation", "The source result needs a list of eligible trades.")
+#+    coverage = source.get("coverage", {})
+#+    if not isinstance(coverage, dict) or "trades_complete" in coverage and not isinstance(coverage["trades_complete"], bool):
+#+        _fail("validation", "Source trade coverage must explicitly describe completeness.")
+#+    if (not isinstance(source.get("warnings", []), list)
+#+            or any(not isinstance(item, str) for item in source.get("warnings", []))
+#+            or not isinstance(source.get("unresolved_trades", []), list)):
+#+        _fail("validation", "Source warnings and unresolved trades must be lists.")
+#+    seen = set()
+#+    for trade in source["trades"]:
+#+        if (not isinstance(trade, dict) or not isinstance(trade.get("id"), str)
+#+                or not trade["id"] or trade["id"] in seen
+#+                or not isinstance(trade.get("flow"), str)
+#+                or trade["flow"] not in {"eflow", "voiceflow", "unknown"}):
+#+            _fail("validation", "Source trades need distinct text IDs and an explicit flow.")
+#+        seen.add(trade["id"])
+#+        for field in ("amount", "chf", "pnl_chf"):
+#+            _decimal(trade.get(field))
+#+    # A JSON round trip detaches retained state from a caller's mutable objects.
+#+    return json.loads(_json(source))
+#+
+#+
+#+def _sqlite_uri(path):
+#+    """Keep Windows UNC hosts in the path for SQLite's empty-authority URI."""
+#+    uri = path.as_uri()
+#+    if uri.startswith("file://") and not uri.startswith("file:///"):
+#+        uri = "file:////" + uri[len("file://"):]
+#+    return uri + "?mode=rw"
+#+
+#+
+#+class DailyStore:
+#+    """One configured durable store shared by the local application instances."""
+#+
+#+    def __init__(self, path, timeout=5):
+#+        try:
+#+            self.path = Path(path).resolve()
+#+            if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 <= timeout <= 60:
+#+                raise ValueError()
+#+            self.timeout = timeout
+#+            self.path.parent.mkdir(parents=True, exist_ok=True)
+#+            with self._transaction(write=True, create=True) as connection:
+#+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
+#+                if tables and "daily_meta" not in tables:
+#+                    _fail("configuration", "This file has another database format. Select a separate Daily Reporting store.")
+#+                if "daily_meta" in tables:
+#+                    version = connection.execute("SELECT version FROM daily_meta").fetchall()
+#+                    if [row[0] for row in version] != [1]:
+#+                        _fail("configuration", "The Daily Reporting database version is unsupported. Use the matching application.")
+#+                statements = (
+#+                    "CREATE TABLE IF NOT EXISTS daily_meta (version INTEGER NOT NULL)",
+#+                    "CREATE TABLE IF NOT EXISTS daily_snapshots (day TEXT PRIMARY KEY, source_json TEXT NOT NULL, source_hash TEXT NOT NULL, saved_at TEXT NOT NULL)",
+#+                    "CREATE TABLE IF NOT EXISTS daily_entries (id TEXT PRIMARY KEY, report_day TEXT NOT NULL, revision INTEGER NOT NULL, removed INTEGER NOT NULL, entry_json TEXT NOT NULL)",
+#+                    "CREATE TABLE IF NOT EXISTS daily_revisions (entry_id TEXT NOT NULL, revision INTEGER NOT NULL, entry_json TEXT NOT NULL, PRIMARY KEY(entry_id, revision))",
+#+                    "CREATE TABLE IF NOT EXISTS daily_retries (token TEXT PRIMARY KEY, request_hash TEXT NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL)",
+#+                    "CREATE INDEX IF NOT EXISTS daily_entries_day ON daily_entries(report_day)",
+#+                )
+#+                for statement in statements:
+#+                    connection.execute(statement)
+#+                if "daily_meta" not in tables:
+#+                    connection.execute("INSERT INTO daily_meta(version) VALUES (1)")
+#+        except DailyStoreError:
+#+            raise
+#+        except (OSError, ValueError, TypeError):
+#+            _fail("configuration", "Check the manual-store path, directory permissions and timeout.")
+#+
+#+    @contextmanager
+#+    def _transaction(self, *, write=False, create=False):
+#+        connection = None
+#+        try:
+#+            target = str(self.path) if create else _sqlite_uri(self.path)
+#+            connection = sqlite3.connect(target, timeout=self.timeout, isolation_level=None, uri=not create)
+#+            connection.row_factory = sqlite3.Row
+#+            mode = connection.execute("PRAGMA journal_mode").fetchone()[0].lower()
+#+            if mode not in {"delete", "truncate", "persist"}:
+#+                _fail("configuration", "Use an owner-approved rollback-journal SQLite store. WAL is unsupported here.")
+#+            connection.execute("PRAGMA synchronous=FULL")
+#+            connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+#+            yield connection
+#+            connection.commit()
+#+        except sqlite3.Error as problem:
+#+            code = getattr(problem, "sqlite_errorcode", 0) & 255
+#+            if code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+#+                _fail("busy", "The shared store is busy. Retry the same save without changing its retry token.")
+#+            _fail("storage", "The shared store operation failed. Check access, its format and the last committed state.")
+#+        except (ValueError, TypeError, KeyError, OSError):
+#+            _fail("storage", "The saved store state could not be read or committed. Check its format and retained backup.")
+#+        finally:
+#+            if connection is not None:
+#+                connection.close()
+#+
+#+    def _write(self, operation, body, token, action):
+#+        if not isinstance(token, str) or not token or len(token) > 200:
+#+            _fail("validation", "Supply one nonempty retry token for this save attempt.")
+#+        request_hash = _hash(_json({"operation": operation, "body": body}))
+#+        with self._transaction(write=True) as connection:
+#+            previous = connection.execute("SELECT request_hash,result_json FROM daily_retries WHERE token=?", (token,)).fetchone()
+#+            if previous is not None:
+#+                if previous["request_hash"] != request_hash:
+#+                    _fail("retry_conflict", "That retry token belongs to different content. Use a new token for a new intentional action.")
+#+                return json.loads(previous["result_json"])
+#+            result = action(connection)
+#+            connection.execute("INSERT INTO daily_retries VALUES (?,?,?,?)", (token, request_hash, _json(result), _now()))
+#+            return result
+#+
+#+    @staticmethod
+#+    def _entry(connection, entry_id, revision, day=None):
+#+        if not isinstance(entry_id, str) or type(revision) is not int or revision < 1:
+#+            _fail("validation", "Supply the entry ID and its positive expected revision.")
+#+        row = connection.execute("SELECT entry_json FROM daily_entries WHERE id=?", (entry_id,)).fetchone()
+#+        if row is None:
+#+            _fail("not_found", "The manual entry is unavailable. Reload the selected report day.")
+#+        entry = json.loads(row[0])
+#+        if day is not None and entry["report_day"] != _day(day):
+#+            _fail("validation", "The manual entry belongs to a different report day. Reload the selected day.")
+#+        if entry["revision"] != revision or entry["removed"]:
+#+            _fail("conflict", "The entry changed or was removed. Keep your input, reload it and resolve the difference.")
+#+        return entry
+#+
+#+    @staticmethod
+#+    def _persist(connection, entry):
+#+        if entry["revision"] == 1:
+#+            connection.execute("INSERT INTO daily_entries VALUES (?,?,?,?,?)", (entry["id"], entry["report_day"], 1, 0, _json(entry)))
+#+        else:
+#+            changed = connection.execute("UPDATE daily_entries SET revision=?,removed=?,entry_json=? WHERE id=? AND revision=?", (entry["revision"], int(entry["removed"]), _json(entry), entry["id"], entry["revision"] - 1))
+#+            if changed.rowcount != 1:
+#+                _fail("conflict", "The entry changed. Reload the report and resolve the difference.")
+#+        connection.execute("INSERT INTO daily_revisions VALUES (?,?,?)", (entry["id"], entry["revision"], _json(entry)))
+#+        return entry
+#+
+#+    @staticmethod
+#+    def _unique_link(connection, entry):
+#+        if entry["event_type"] != "issuance" or not entry["trade_id"]:
+#+            return
+#+        for row in connection.execute("SELECT entry_json FROM daily_entries WHERE report_day=? AND removed=0", (entry["report_day"],)):
+#+            other = json.loads(row[0])
+#+            if other["id"] != entry["id"] and other["event_type"] == "issuance" and other["trade_id"] == entry["trade_id"]:
+#+                _fail("conflict", "Another active issuance already links this SLD trade. Review the existing entry.")
+#+
+#+    def add(self, day, values, retry_token):
+#+        day, values = _day(day), _values(values)
+#+
+#+        def action(connection):
+#+            now = _now()
+#+            entry = {**values, "id": uuid.uuid4().hex, "report_day": day, "revision": 1,
+#+                     "removed": False, "created_at": now, "updated_at": now}
+#+            self._unique_link(connection, entry)
+#+            return self._persist(connection, entry)
+#+
+#+        return self._write("add", {"day": day, "values": values}, retry_token, action)
+#+
+#+    def update(self, entry_id, expected_revision, values, retry_token, *, day=None):
+#+        values = _values(values)
+#+
+#+        def action(connection):
+#+            old = self._entry(connection, entry_id, expected_revision, day)
+#+            entry = {**old, **values, "revision": old["revision"] + 1, "updated_at": _now()}
+#+            self._unique_link(connection, entry)
+#+            return self._persist(connection, entry)
+#+
+#+        return self._write("update", {"id": entry_id, "revision": expected_revision, "values": values, "day": day}, retry_token, action)
+#+
+#+    def link(self, entry_id, expected_revision, trade_id, retry_token, *, confirmed_missing=False, day=None):
+#+        trade_id = _text(trade_id, 512) if trade_id not in (None, "") else None
+#+        if not isinstance(confirmed_missing, bool):
+#+            _fail("validation", "The missing-SLD confirmation must be true or false.")
+#+
+#+        def action(connection):
+#+            old = self._entry(connection, entry_id, expected_revision, day)
+#+            if old["event_type"] != "issuance":
+#+                _fail("validation", "Only subscription issuance entries link to SLD trades.")
+#+            entry = {**old, "trade_id": trade_id, "confirmed_missing": confirmed_missing,
+#+                     "revision": old["revision"] + 1, "updated_at": _now()}
+#+            _confirmation(entry)
+#+            self._unique_link(connection, entry)
+#+            return self._persist(connection, entry)
+#+
+#+        return self._write("link", {"id": entry_id, "revision": expected_revision, "trade_id": trade_id,
+#+                                    "confirmed_missing": confirmed_missing, "day": day}, retry_token, action)
+#+
+#+    def remove(self, entry_id, expected_revision, retry_token, *, day=None):
+#+        def action(connection):
+#+            old = self._entry(connection, entry_id, expected_revision, day)
+#+            return self._persist(connection, {**old, "revision": old["revision"] + 1, "removed": True, "updated_at": _now()})
+#+
+#+        return self._write("remove", {"id": entry_id, "revision": expected_revision, "day": day}, retry_token, action)
+#+
+#+    def capture(self, source, retry_token):
+#+        source = _source(source)
+#+        body = _json(source)
+#+
+#+        def action(connection):
+#+            old = connection.execute("SELECT source_hash,saved_at FROM daily_snapshots WHERE day=?", (source["day"],)).fetchone()
+#+            if old is not None:
+#+                if old["source_hash"] != _hash(body):
+#+                    _fail("snapshot_exists", "This day already has saved SLD figures. Its captured source remains unchanged.")
+#+                return {"day": source["day"], "saved_at": old["saved_at"], "revision": 1}
+#+            saved_at = _now()
+#+            connection.execute("INSERT INTO daily_snapshots VALUES (?,?,?,?)", (source["day"], body, _hash(body), saved_at))
+#+            return {"day": source["day"], "saved_at": saved_at, "revision": 1}
+#+
+#+        return self._write("capture", source, retry_token, action)
+#+
+#+    @staticmethod
+#+    def _snapshot(connection, day):
+#+        row = connection.execute("SELECT source_json,source_hash,saved_at FROM daily_snapshots WHERE day=?", (day,)).fetchone()
+#+        if row is None:
+#+            return None, None
+#+        if _hash(row["source_json"]) != row["source_hash"]:
+#+            _fail("storage", "The saved source result failed its integrity check. Use the retained backup and recovery procedure.")
+#+        return _source(json.loads(row["source_json"]), day), row["saved_at"]
+#+
+#+    def snapshot(self, day):
+#+        with self._transaction() as connection:
+#+            return self._snapshot(connection, _day(day))[0]
+#+
+#+    def days(self):
+#+        with self._transaction() as connection:
+#+            return [row[0] for row in connection.execute("SELECT day FROM daily_snapshots UNION SELECT report_day FROM daily_entries ORDER BY 1")]
+#+
+#+    @staticmethod
+#+    def _entries(connection, day, include_removed=False):
+#+        sql = "SELECT entry_json FROM daily_entries WHERE report_day=?"
+#+        if not include_removed:
+#+            sql += " AND removed=0"
+#+        return [json.loads(row[0]) for row in connection.execute(sql + " ORDER BY id", (day,))]
+#+
+#+    def entries(self, day, *, include_removed=False):
+#+        with self._transaction() as connection:
+#+            return self._entries(connection, _day(day), include_removed)
+#+
+#+    def history(self, entry_id):
+#+        with self._transaction() as connection:
+#+            return [json.loads(row[0]) for row in connection.execute("SELECT entry_json FROM daily_revisions WHERE entry_id=? ORDER BY revision", (entry_id,))]
+#+
+# COPY BLOCK 18
+#+    def load(self, day, source=None):
+#+        day = _day(day)
+#+        if source is not None:
+#+            source = _source(source, day)
+#+        with self._transaction() as connection:
+#+            saved, saved_at = self._snapshot(connection, day)
+#+            entries = self._entries(connection, day)
+#+        state = "live" if source is not None else "saved" if saved is not None else "missing"
+#+        return compose_day(day, source if source is not None else saved, entries,
+#+                           source_state=state, snapshot_saved_at=saved_at)
+#+
+#+
+#+def _sum(trades, field):
+#+    missing = sum(trade.get(field) in (None, "") for trade in trades)
+#+    if missing:
+#+        return None, missing
+#+    values = [Decimal(trade[field]) for trade in trades]
+#+    with localcontext() as context:
+#+        context.prec = max(28, max((value.adjusted() for value in values), default=0)
+#+                           - min((value.as_tuple().exponent for value in values), default=0)
+#+                           + len(str(len(values))) + 3)
+#+        return str(sum(values, Decimal(0))), 0
+#+
+#+
+#+def _signature(row):
+#+    fields = [str(row.get(field) or "").strip().casefold() for field in ("product_type", "currency", "underlyings")]
+#+    amount = row.get("amount")
+#+    if not all(fields) or amount in (None, ""):
+#+        return None
+#+    return (*fields, Decimal(amount))
+#+
+#+
+#+def compose_day(day, source, entries, *, source_state="live", snapshot_saved_at=None):
+#+    """Compose one day without mutating source rows or inferring an SLD match."""
+#+    day = _day(day)
+#+    trades = [] if source is None else [dict(row) for row in source["trades"]]
+#+    voice = {row["id"]: row for row in trades if row["flow"] == "voiceflow"}
+#+    eflow = [row for row in trades if row["flow"] == "eflow"]
+#+    unknown = [row for row in trades if row["flow"] == "unknown"]
+#+    active = [dict(row) for row in entries if not row.get("removed") and row["report_day"] == day]

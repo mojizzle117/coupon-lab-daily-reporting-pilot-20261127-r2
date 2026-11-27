@@ -1,0 +1,406 @@
+#=    globals_.append(Input('filter-received', 'value'))
+#=    inputs = globals_ + [Input('analysis-missed-state', 'data'), Input('analysis-missed-clear', 'n_clicks'),
+#=        Input('reset', 'n_clicks'), Input('mm-reasons', 'clickData'), Input('mm-details', 'clickData'),
+#=        Input('mm-timeline', 'clickData'), Input('mm-timeline-back', 'n_clicks'),
+#=        Input('mm-breakdown', 'clickData'), Input('mm-dimension', 'value'),
+#=        Input('mm-case-table', 'active_cell'), Input('mm-case-table', 'page_current'), Input('mm-case-table', 'sort_by'),
+#=        Input('mm-rfq-section', 'open'), Input('mm-case-search', 'value'),
+#=        Input('mm-detail-search', 'value'), Input('mm-detail-previous', 'n_clicks'), Input('mm-detail-next', 'n_clicks'),
+#=        Input('mm-menu-search', 'value'), Input('mm-menu-previous', 'n_clicks'), Input('mm-menu-next', 'n_clicks'),
+#=        *[Input('mm-all-' + scope + '-' + mode, 'n_clicks') for scope in ('reasons', 'details') for mode in ('include', 'exclude')],
+#=        Input({'type': 'mm-open-reason', 'reason': ALL}, 'n_clicks'),
+#=        Input({'type': 'mm-filter', 'kind': ALL, 'reason': ALL, 'detail': ALL, 'mode': ALL}, 'n_clicks'),
+#=        Input({'type': 'mm-remove', 'group': ALL, 'token': ALL}, 'n_clicks')]
+#=    states = [State('missed-state', 'data'), State('location', 'pathname'), State('mm-metric', 'value')]
+#=    outputs = [Output('missed-state', 'data'), Output('mm-case-table', 'page_current'),
+#=               Output('mm-case-table', 'active_cell'), Output('mm-reasons', 'clickData'),
+#=               Output('mm-details', 'clickData'), Output('mm-case-search', 'value'),
+#=               Output('mm-metric', 'value'), Output('mm-dimension', 'value'), Output('mm-timeline', 'clickData'),
+#=               Output('mm-detail-search', 'value'), Output('mm-breakdown', 'clickData')]
+#=
+#=    @app.callback(outputs, inputs, states, prevent_initial_call=True)
+#=    def interact(*args):
+#=        values = {(str(item.component_id), item.component_property): value for item, value in zip(inputs + states, args)}
+#=        get = lambda name, prop='value': values.get((str(name), prop))
+#=        def population_filters():
+#=            filters = {name: get('filter-' + name) or [] for name in BUSINESS_FILTERS}
+#=            return p.with_received_filter(filters, get('filter-received'))
+#=
+#=        trigger = ctx.triggered_id
+#=        if trigger is None: raise PreventUpdate
+#=        pathname = get('location', 'pathname')
+#=        if pathname and report_path(app, pathname) not in {
+#=            '/rfq/' + PAGE, '/rfq/missed-opportunities', '/rfq/missed-priorities', '/rfq/reasons-coverage'
+#=        }:
+#=            raise PreventUpdate
+#=        state = deepcopy(get('missed-state', 'data') or {})
+#=        # The shared analysis-store callback can finish after Reset while still
+#=        # carrying the old local query in State. A reset epoch prevents that
+#=        # late callback from resurrecting a pre-reset include/exclude selection.
+#=        def counter(value):
+#=            try: return max(0, int(value or 0))
+#=            except (TypeError, ValueError): return 0
+#=        epochs = {'_reset': counter(get('reset', 'n_clicks')),
+#=                  '_analysis_reset': counter(get('analysis-missed-clear', 'n_clicks'))}
+#=        epoch_changed = any(value > counter(state.get(name)) for name, value in epochs.items())
+#=        def fresh_state():
+#=            value = dict(epochs)
+#=            if get('mm-rfq-section', 'open') is True:
+#=                value['cases_open'] = True
+#=            return value
+#=        if epoch_changed:
+#=            state = fresh_state()
+#=        result = [no_update] * len(outputs)
+#=        def done(event, reset_page=False):
+#=            if epoch_changed:
+#=                event, reset_page = 'selection', True
+#=            if any(epochs.values()) or any(name in state for name in epochs):
+#=                state.update(epochs)
+#=            state['_event'] = event
+#=            state['_revision'] = int(state.get('_revision', 0)) + 1
+#=            result[0] = state
+#=            if reset_page:
+#=                state['case_page'] = 0
+#=                result[1:5] = [0, None, None, None]
+#=                result[8] = None
+#=                result[10] = None
+#=            return result
+#=        if 'reset.n_clicks' in ctx.triggered_prop_ids or trigger == 'analysis-missed-clear':
+#=            return [fresh_state(), 0, None, None, None, '', no_update, no_update, None, '', None]
+#=        dimension = get('mm-dimension') or CONTROL_DEFAULTS['mm-dimension']
+#=        previous_breakdown = _breakdown_selection(state)
+#=        state = for_breakdown_dimension(state, dimension)
+#=        if previous_breakdown and not _breakdown_selection(state):
+#=            for name in ('rfq_key', 'timeline_day', 'timeline_scope'):
+#=                state.pop(name, None)
+#=            state['detail_page'] = 0
+#=            if 'mm-dimension.value' in ctx.triggered_prop_ids:
+#=                return done('selection', True)
+#=        if ('filter-received.value' in ctx.triggered_prop_ids or
+#=                isinstance(trigger, str) and trigger in {'platform', 'month', 'population', 'analysis-missed-state',
+#=                                                          *['filter-' + name for name in BUSINESS_FILTERS]}):
+#=            for name in ('rfq_key', 'timeline_day', 'timeline_scope'): state.pop(name, None)
+#=            state['detail_page'] = 0
+#=            state['case_search'] = ''
+#=            result[5] = ''
+#=            return done('selection', True)
+#=        if trigger == 'mm-breakdown':
+#=            click = get('mm-breakdown', 'clickData')
+#=            points = click.get('points') if isinstance(click, dict) else None
+#=            point = points[0].get('customdata') if isinstance(points, list) and points and isinstance(points[0], dict) else None
+#=            if not isinstance(point, (list, tuple)) or len(point) < 5 or point[4] != dimension:
+#=                raise PreventUpdate
+#=            selection = _breakdown_selection({'breakdown': {'dimension': dimension, 'category': point[0]}})
+#=            if not selection:
+#=                raise PreventUpdate
+#=            if selection != previous_breakdown:
+#=                data = _scope_data(index, snapshot, get('platform'), get('month'), get('population'),
+#=                                   population_filters(), get('analysis-missed-state', 'data') or {}, state)
+#=                if not _engine().breakdown_members(index, data['breakdown_base'], dimension, selection['category'],
+#=                        reason=state.get('reason'), detail=state.get('detail'), spec=data['query'],
+#=                        bands=snapshot.get('ticket_size_bands')):
+#=                    raise PreventUpdate
+#=            state = transition(state, 'breakdown', selection, index)
+#=            return done('selection', True)
+#=        if trigger in ('mm-timeline', 'mm-timeline-back'):
+#=            if trigger == 'mm-timeline-back':
+#=                state.pop('timeline_day', None); state.pop('timeline_scope', None)
+#=            else:
+#=                click = get('mm-timeline', 'clickData')
+#=                points = click.get('points') if isinstance(click, dict) else None
+#=                if not isinstance(points, list) or not points or not isinstance(points[0], dict): raise PreventUpdate
+#=                point = points[0].get('customdata')
+#=                day = point[0] if isinstance(point, (list, tuple)) and point else None
+#=                filters = population_filters()
+#=                analysis = get('analysis-missed-state', 'data') or {}
+#=                data = _scope_data(index, snapshot, get('platform'), get('month'), get('population'), filters, analysis, state)
+#=                from coupon_lab.missed_timeline import timeline
+#=                daily = timeline(index, data['selected'], get('month'), available=get('month') in data['parent']['covered'])
+#=                if not isinstance(day, str) or day not in {item['date'] for item in daily['days'] if item['date']}: raise PreventUpdate
+#=                state['timeline_day'] = day
+#=                state['timeline_scope'] = timeline_scope(get('platform'), get('month'), get('population'),
+#=                    filters, _query(state, index), analysis, _breakdown_selection(state))
+#=            result[8] = None
+#=            return done('timeline')
+#=        if trigger == 'mm-case-table':
+#=            prop = next(iter(ctx.triggered_prop_ids), '').rsplit('.', 1)[-1]
+#=            if prop == 'active_cell':
+#=                cell = get('mm-case-table', 'active_cell') or {}
+#=                key = cell.get('row_id')
+#=                filters = population_filters()
+#=                data = _scope_data(index, snapshot, get('platform'), get('month'), get('population'), filters,
+#=                                   get('analysis-missed-state', 'data') or {}, state)
+#=                if key not in data['selected']: raise PreventUpdate
+# COPY BLOCK 10
+#=                records = _case_records(index, data['selected'], state.get('case_search') or '')
+#=                if key not in {item['id'] for item in records}: raise PreventUpdate
+#=                state['rfq_key'] = key
+#=                return done('case')
+#=            if prop == 'page_current':
+#=                page = max(int(get('mm-case-table', 'page_current') or 0), 0)
+#=                if page == state.get('case_page', 0): raise PreventUpdate
+#=                state['case_page'] = page
+#=            elif prop == 'sort_by':
+#=                state['case_sort'] = get('mm-case-table', 'sort_by') or []
+#=                state['case_page'] = 0; result[1] = 0
+#=            else: raise PreventUpdate
+#=            result[2] = None
+#=            return done('case_page')
+#=        if isinstance(trigger, str) and trigger in {'mm-rfq-section', 'mm-case-search'}:
+#=            if trigger == 'mm-rfq-section': state['cases_open'] = get('mm-rfq-section', 'open') is True
+#=            else:
+#=                search = str(get('mm-case-search') or '')
+#=                if search == state.get('case_search', ''): raise PreventUpdate
+#=                state['case_search'] = search; state['case_page'] = 0; result[1] = 0
+#=            return done('case_page')
+#=        if isinstance(trigger, str) and trigger in {'mm-menu-search', 'mm-menu-previous', 'mm-menu-next'}:
+#=            if trigger == 'mm-menu-search':
+#=                search = str(get('mm-menu-search') or '')
+#=                if search == state.get('menu_search', ''): raise PreventUpdate
+#=                state.update(menu_search=search, menu_page=0)
+#=            else:
+#=                if not get(trigger, 'n_clicks'): raise PreventUpdate
+#=                state['menu_page'] = max(0, int(state.get('menu_page', 0)) + (-1 if trigger.endswith('previous') else 1))
+#=            return done('menu')
+#=        if isinstance(trigger, str) and trigger in {'mm-detail-search', 'mm-detail-previous', 'mm-detail-next'}:
+#=            if trigger == 'mm-detail-search':
+#=                search = str(get('mm-detail-search') or '')
+#=                if search == state.get('detail_search', ''): raise PreventUpdate
+#=                state.update(detail_search=search, detail_page=0)
+#=            else:
+#=                if not get(trigger, 'n_clicks'): raise PreventUpdate
+#=                state['detail_page'] = max(0, int(state.get('detail_page', 0)) + (-1 if trigger.endswith('previous') else 1))
+#=            state['_reveal_detail'] = False
+#=            return done('detail_page')
+#=        if isinstance(trigger, str) and trigger.startswith('mm-all-'):
+#=            if not get(trigger, 'n_clicks'): raise PreventUpdate
+#=            scope, mode = trigger.removeprefix('mm-all-').rsplit('-', 1)
+#=            parent = _active_menu_reason(index, state)
+#=            state = transition(state, 'bulk', {'kind': 'reason' if scope == 'reasons' else 'detail', 'reason': parent, 'mode': mode}, index)
+#=            return done('selection', True)
+#=        if trigger in ('mm-reasons', 'mm-details'):
+#=            click = get(trigger, 'clickData')
+#=            if not click or not click.get('points'): raise PreventUpdate
+#=            token = click['points'][0].get('customdata')
+#=            token = token[0] if isinstance(token, (list, tuple)) else token
+#=            state = transition(state, 'reason' if trigger == 'mm-reasons' else 'detail', token, index)
+#=            result[9] = ''
+#=        elif isinstance(trigger, dict):
+#=            # Dash's string lookup can miss non-ASCII IDs. Match the decoded
+#=            # ID to the actual input so provider-code filter chips can clear.
+#=            clicks = next((item.get('value') for group in ctx.inputs_list if isinstance(group, list)
+#=                           for item in group if item.get('id') == trigger), None)
+#=            if not clicks: raise PreventUpdate
+#=            if trigger['type'] == 'mm-open-reason':
+#=                if trigger.get('reason') not in index['reasons']: raise PreventUpdate
+#=                state.update(menu_reason=trigger['reason'], menu_page=0, menu_search='')
+#=                return done('menu')
+#=            state = transition(state, 'filter' if trigger['type'] == 'mm-filter' else 'remove', trigger, index)
+#=            if state.get('_reveal_detail'): result[9] = ''
+#=        else: raise PreventUpdate
+#=        return done('selection', True)
+# FILE {"kind": "app", "name": "tests/release_checks.py", "new_lf": true, "old_lf": true}
+#="""Clean-source reference and complete-transfer acceptance; no office inputs.
+#=
+#=Run explicitly before a home transfer, from the application folder:
+#=    python -m unittest discover -s tests -p release_checks.py -v
+#=The selftest test_*.py discovery deliberately excludes this file because office
+#=reviewed mappings may legitimately differ from the shipped reference population.
+#=Saved public source data is read offline; no provider or office connection is used.
+#="""
+#=from __future__ import annotations
+#=
+#=from collections import Counter
+#=import csv
+#=from decimal import Decimal
+#=import importlib.util
+#=import json
+#=from pathlib import Path
+#=import shutil
+#=import subprocess
+#=import sys
+#=import tempfile
+#=import unittest
+#=
+#=from coupon_lab.normalize import validate_references
+#=from coupon_lab.product_reference import mapped_capped
+#=from coupon_lab.sources import REFERENCE_HEADERS
+#=from coupon_lab.underlying_reference import validate_master
+#=from tools.prepare_fx_reference import CURRENCIES, MONTHS, build_rows, borsa_metal_rates, snb_rates
+#=
+#=ROOT = Path(__file__).resolve().parents[1]
+#=SOURCES = ROOT / "reference/fx_sources"
+#=CODES = set('CAD CHF CNY CZK DKK EUR GBP HKD HUF JPY KRW MXN MYR NOK NZD PLN RUB SEK SGD THB TRY USD ZAR ILS XAG XAU XPD XPT'.split())
+#=
+#=
+#=def read(name):
+#=    with (ROOT / "reference" / name).open(encoding="utf-8-sig", newline="") as stream:
+#=        return list(csv.DictReader(stream))
+#=
+#=
+#=class PublicReferenceAcceptanceChecks(unittest.TestCase):
+#=    def test_every_requested_currency_month_has_positive_sourced_factor(self):
+#=        rows=read('fx_rates.csv')
+#=        index=validate_references({'references':{'fx':rows}})['fx']
+#=        expected={(month,code) for month in MONTHS for code in CODES}
+#=        self.assertTrue(expected<=index.keys())
+#=        self.assertTrue(all(index[key] is not None and index[key]>0 for key in expected))
+#=        self.assertTrue(all(index[month,'CHF']==Decimal(1) for month in MONTHS))
+#=        self.assertTrue(all(row['Source'] for row in rows if (row['Month'],row['Currency']) in expected))
+#=
+#=    def test_supplied_aliases_preserved_and_only_explicit_unknown_is_pending(self):
+#=        master=validate_master(read('underlying_master.csv'))
+#=        requested=read('underlying_bloomberg_requests.csv')
+#=        expected={(row['Platform'],row['Identifier_type'],row['Source_identifier']) for row in requested}
+#=        self.assertEqual(len(expected),1538)
+#=        self.assertTrue(expected<=master.keys())
+#=        pending={key for key in expected if str(master[key]['Reviewed']).lower()!='true'}
+#=        self.assertLessEqual(pending,{('PLATFORM_B','ISIN','US78432U1079')})
+#=        for key in expected-pending:
+#=            self.assertTrue(master[key]['Name'])
+#=            self.assertNotIn(master[key]['Instrument_type'],{'','Unknown'})
+#=            self.assertTrue(master[key]['Source'])
+#=
+#=    def test_exact_verified_anchors_and_distinct_listing_regions(self):
+#=        master=validate_master(read('underlying_master.csv'))
+#=        for label in ('ABBN SE','NOVN SE','PLATFORM_A_G SE'):
+#=            self.assertEqual(master['PLATFORM_A','SYMBOL',label]['Instrument_type'],'STOCK')
+#=            self.assertEqual(master['PLATFORM_A','SYMBOL',label]['Region'],'CH')
+#=        for label in ('SPX','NDX','SMI','SX5E','FTSEMIB','RTY'):
+#=            self.assertEqual(master['PLATFORM_A','SYMBOL',label]['Instrument_type'],'INDEX')
+#=        self.assertEqual(master['PLATFORM_A','SYMBOL','JD/LN']['ISIN'],'GB00BM8Q5M07')
+#=        self.assertEqual(master['PLATFORM_A','SYMBOL','EURUSD']['Instrument_type'],'CURRENCY_PAIR')
+#=        self.assertEqual(master['PLATFORM_A','SYMBOL','NVDA UW']['Region'],'US')
+#=        self.assertEqual(master['PLATFORM_A','SYMBOL','ASML NA']['Region'],'EU')
+#=
+#=    def test_primary_market_proxy_keeps_listing_context_and_unknowns(self):
+#=        master=validate_master(read('underlying_master.csv'))
+#=        swiss=master['PLATFORM_A','SYMBOL','AMS SE']
+#=        primary=master['PLATFORM_B','ISIN','AT0000A3EPA4']
+#=        self.assertEqual(swiss['Region'],'CH')
+#=        self.assertEqual(primary['Region'],'EU')
+#=        self.assertNotEqual(swiss['Canonical_id'],primary['Canonical_id'])
+#=        self.assertIn('Primary Market MIC',primary['Note'])
+#=        unknown=master['PLATFORM_B','ISIN','US78432U1079']
+#=        self.assertNotEqual(unknown['Reviewed'].lower(),'true')
+#=        self.assertFalse(unknown['FIGI'])
+#=
+#=
+#=class ProductReferenceAcceptanceChecks(unittest.TestCase):
+#=    def setUp(self):
+#=        with (ROOT / "reference/product_mappings.csv").open(newline="", encoding="utf-8") as stream:
+#=            self.rows = list(csv.DictReader(stream))
+#=        self.index = {(row["Platform"], row["Source_product"]): row for row in self.rows}
+#=
+#-    def test_all_48_observed_exact_labels_have_active_unique_mappings(self):
+#+    def test_observed_and_office_added_exact_labels_have_active_unique_mappings(self):
+#=        contract = json.loads((ROOT / "reference/office_source_contracts.json").read_text())
+#=        expected = {("PLATFORM_A" if vocabulary["source"] == "PLATFORM_A feedback" else "PLATFORM_B", label)
+#=                    for vocabulary in contract["vocabularies"]
+#=                    if vocabulary["field"] in {"Product Type", "Product type"}
+#=                    for label in vocabulary["values"]}
+#-        self.assertEqual(len(self.rows), 48)
+#-        self.assertEqual(len(self.index), 48)
+#+        added = {
+#+            "Autocallable Equity Barrier Reverse Convertible with Conditional Coupon": "Barrier Reverse Convertible",
+#+            "Autocallable Worst-of Equity Reverse Convertible with Conditional Coupon": "Reverse Convertible",
+#+        }
+#+        for label, family in added.items():
+#+            expected.add(("PLATFORM_A", label))
+#+            self.assertEqual(self.index["PLATFORM_A", label]["Common_product"], family)
+#+        self.assertEqual(len(self.rows), len(expected))
+#+        self.assertEqual(len(self.index), len(expected))
+#=        self.assertEqual(set(self.index), expected)
+#=        self.assertTrue(all(row["Reviewed"] == "true" for row in self.rows))
+#=
+#=    def test_base_families_ignore_callability_and_basket_wording(self):
+#=        examples = (("PLATFORM_A", "Autocallable Worst-of Equity Barrier Reverse Convertible"),
+#=                    ("PLATFORM_B", "Callable Multi Barrier Reverse Convertible"))
+#=        for key in examples:
+#=            self.assertEqual(self.index[key]["Common_product"], "Barrier Reverse Convertible")
+#=        self.assertEqual(self.index[("PLATFORM_A", "Autocallable Equity Reverse Convertible with Conditional Memory Coupon")]["Common_product"], "Reverse Convertible")
+#=        self.assertEqual(len({row["Common_product"] for row in self.rows}), 8)
+#=
+#=    def test_fx_reverse_convertible_and_dual_currency_share_a_family(self):
+#=        platform_a = self.index[("PLATFORM_A", "FX Reverse Convertible")]
+#=        platform_b = self.index[("PLATFORM_B", "Dual Currency Note")]
+#=        self.assertEqual(platform_a["Common_product"], "Dual Currency Note / FX Reverse Convertible")
+#=        self.assertEqual(platform_b["Common_product"], platform_a["Common_product"])
+#=        self.assertEqual(self.index[("PLATFORM_A", "FX Discount Certificate")]["Common_product"], "Discount Certificate")
+#=
+#=    def test_all_four_capped_labels_retain_their_base_family(self):
+#=        expected = {"Capped Multi Bonus Certificate": "Bonus Certificate",
+#=                    "Capped Bonus Certificate": "Bonus Certificate",
+#=                    "Capped Outperformance Certificate": "Outperformance Certificate",
+#=                    "Capped Capital Protection": "Capital Protection"}
+#=        actual = {row["Source_product"]: row["Common_product"] for row in self.rows if mapped_capped(row) == "Yes"}
+#=        self.assertEqual(actual, expected)
+#=        self.assertEqual(Counter(mapped_capped(row) for row in self.rows),
+#-                         Counter({"Yes": 4, "No": 4, "Not applicable": 40}))
+#+                         Counter({"Yes": 4, "No": 4, "Not applicable": 42}))
+#=
+#=    def test_barrier_rules_preserved_without_new_family_inference(self):
+#=        with (ROOT / "reference/product_mappings_proposed.csv").open(newline="", encoding="utf-8") as stream:
+#=            proposed = {(row["Platform"], row["Source_product"]): row for row in csv.DictReader(stream)}
+#+        for key, original in proposed.items():
+#+            self.assertEqual(self.index[key]["Barrier"], original["Barrier"])
+#=        for key, row in self.index.items():
+#-            self.assertEqual(row["Barrier"], proposed[key]["Barrier"])
+#=            if key[0] == "PLATFORM_A":
+#=                self.assertEqual(row["Barrier"], "Yes" if "Barrier" in key[1] else "No")
+#=        self.assertEqual(self.index[("PLATFORM_B", "Bonus Certificate")]["Barrier"], "Unknown")
+#=
+#=
+#=class FXPublishedAcceptanceChecks(unittest.TestCase):
+#=    def test_all_requested_codes_and_months_have_sourced_rates(self):
+#=        rows = build_rows(SOURCES / "SNB_DEVKUM_M0_2025_2026.csv", SOURCES / "ECB_CHF_ILS_DAILY_2025_2026.csv")
+#=        self.assertEqual(len(rows), 22 * 28)
+#=        self.assertEqual({(r["Month"], r["Currency"]) for r in rows}, {(m, c) for m in MONTHS for c in CURRENCIES})
+#=        self.assertEqual(sum(bool(r["CHF_per_unit"]) for r in rows), 616)
+#=        self.assertFalse(any(not r["CHF_per_unit"] for r in rows))
+#=        self.assertTrue(all(Decimal(r["CHF_per_unit"]) > 0 and r["Source"] for r in rows))
+#=        self.assertTrue(all(r["CHF_per_unit"] == "1" for r in rows if r["Currency"] == "CHF"))
+#=
+#=    def test_saved_runtime_reference_rebuild_is_exact(self):
+#=        expected = build_rows(SOURCES / "SNB_DEVKUM_M0_2025_2026.csv", SOURCES / "ECB_CHF_ILS_DAILY_2025_2026.csv")
+#=        with (ROOT / "reference/fx_rates.csv").open(newline="") as f:
+#=            self.assertEqual(list(csv.DictReader(f)), expected)
+#=
+#=    def test_snb_per_hundred_and_per_one_conversion(self):
+#=        rates = snb_rates(SOURCES / "SNB_DEVKUM_M0_2025_2026.csv")
+#=        self.assertEqual(rates["2025-01", "JPY"], Decimal("0.0058142"))
+#=        self.assertEqual(rates["2025-01", "USD"], Decimal("0.90933"))
+#=        self.assertEqual(len(rates), 484)
+#=
+#=
+#=    def test_borsa_published_coverage_and_independent_first_month_sum(self):
+#=        path = SOURCES / "BORSA_METAL_MTL_EUR_DAILY_2025_2026.csv"
+#=        ecb = SOURCES / "ECB_CHF_ILS_DAILY_2025_2026.csv"
+#=        rates, metadata = borsa_metal_rates(path, ecb)
+#=        self.assertEqual(len(rates), 88)
+#=        self.assertEqual(sum(item["count"] for item in metadata.values()), 447 * 4)
+#=        self.assertEqual(sum(len(item["excluded_dates"]) for item in metadata.values()), 6 * 4)
+#=        with ecb.open(newline="") as stream:
+#=            fx = {row["Date"]: Decimal(row["CHF_per_EUR"]) for row in csv.DictReader(stream)}
+#=        with path.open(newline="") as stream:
+#=            values = [Decimal(row["EUR_per_troy_ounce"]) * fx[row["Date"]]
+#=                      for row in csv.DictReader(stream)
+#=                      if row["Currency"] == "XAU" and row["Date"].startswith("2025-01") and row["Date"] in fx]
+#=        expected = (sum(values) / len(values)).quantize(Decimal("0.000000000001"))
+#=        self.assertEqual(rates["2025-01", "XAU"], expected)
+#=
+#=
+#=class InitialMappingAcceptanceChecks(unittest.TestCase):
+#=    def test_five_shipped_candidates_are_inactive(self):
+#=        with (ROOT / "reference/main_reason_mappings.csv").open(newline="") as stream:
+#=            reader = csv.DictReader(stream)
+#=            rows = list(reader)
+#=            self.assertEqual(tuple(reader.fieldnames), REFERENCE_HEADERS["main_reasons"])
+#=        self.assertEqual(len(rows), 5)
+#=        self.assertTrue(all(row["Reviewed"] == "false" for row in rows))
+#=        admin = next(row for row in rows if row["Validation_code"] == "ADMIN_UNDERLYING_NOT_FOUND")
+#=        self.assertEqual(admin["Main_reason_id"], "rule:admin_absent")
+#=
+#=
+#=class CompleteTransferAcceptanceChecks(unittest.TestCase):
+#=    def test_exact_single_txt_install_overwrite_and_portability(self):

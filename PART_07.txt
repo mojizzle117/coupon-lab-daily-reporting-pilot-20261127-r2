@@ -1,0 +1,380 @@
+#=    """Cache immutable data selections, never mutable figures or browser state."""
+#=    engine = _engine()
+#=    runtime = index.get('runtime')
+#=    def cached(kind, token, factory):
+#=        return runtime.cached(kind, token, factory) if runtime is not None else factory()
+#=    def cohort_keys(choices):
+#=        if runtime is not None:
+#=            return list(runtime.cohort_keys(platform, population, choices, snapshot.get('ticket_size_bands')))
+#=        return [engine.key(row) for row in p.cohort(snapshot['rows'], platform, population, choices,
+#=                                                   snapshot.get('ticket_size_bands'))]
+#=    def digest(value):
+#=        return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+#=    population_token = ('missed-population', platform, month, population, digest(filters))
+#=    def population_data():
+#=        keys = cohort_keys(filters)
+#=        covered = dm.covered_months(snapshot, platform)
+#=        previous_month = _month_before(month)
+#=        def summary(period):
+#=            if period not in covered:
+#=                return m.unavailable_summary()
+#=            return m.monthly([index['entries'][key]['row'] for key in keys
+#=                              if index['entries'][key]['row']['month'] == period])
+#=        current = summary(month)
+#=        previous = summary(previous_month)
+#=        expected = [f'{month[:4]}-{n:02d}' for n in range(1, int(month[-2:]) + 1)]
+#=        available = set(expected).intersection(covered)
+#=        ytd = m.monthly([index['entries'][key]['row'] for key in keys
+#=                        if index['entries'][key]['row']['month'] in available]) if available else m.unavailable_summary()
+#=        baseline = [key for key in keys if index['entries'][key]['row'].get('qualifying_quote') is False]
+#=        return {'keys': keys, 'baseline': baseline, 'covered': covered, 'current': current,
+#=                'previous': previous, 'ytd': ytd, 'previous_month': previous_month}
+#=    parent = cached('population', population_token, population_data)
+#=    query = _query(state, index)
+#=    breakdown_selection = _breakdown_selection(state)
+#=    focus = (state.get('reason'), state.get('detail'))
+#=    selection_token = ('missed-selection', population_token, digest(analysis),
+#=                       digest(query), digest((breakdown_selection, focus) if breakdown_selection else None))
+#=
+#=    def selection_data():
+#=        candidates = set(cohort_keys(analysis)) if any(analysis.values()) else None
+#=        baseline = [key for key in parent['baseline'] if candidates is None or key in candidates]
+#=        current_base = [key for key in baseline if index['entries'][key]['row']['month'] == month]
+#=        result = engine.select(index, baseline, query)
+#=        matched = result['matched']
+#=        breakdown_base = [key for key in matched if index['entries'][key]['row']['month'] == month]
+#=        selected = breakdown_base
+#-        reason_query = {**query, 'include_details': [], 'exclude_details': []}
+#+        reason_query = {**query, 'include_details': []}
+#=        reason_context = [key for key in engine.select(index, baseline, reason_query)['matched']
+#=                          if index['entries'][key]['row']['month'] == month]
+#=        population_current = [key for key in parent['baseline'] if index['entries'][key]['row']['month'] == month]
+#=        population_previous = [key for key in parent['baseline'] if index['entries'][key]['row']['month'] == parent['previous_month']]
+#=        if breakdown_selection:
+#=            # Match the bar's category on each period's RFQs using the same
+#=            # attribution as the breakdown chart, including linked provider codes.
+#=            member_keys = set(engine.breakdown_members(index, [*matched, *reason_context],
+#=                breakdown_selection['dimension'], breakdown_selection['category'],
+#=                reason=focus[0], detail=focus[1], spec=query, bands=snapshot.get('ticket_size_bands')))
+#=            matched = [key for key in matched if key in member_keys]
+#=            selected = [key for key in breakdown_base if key in member_keys]
+#=            reason_context = [key for key in reason_context if key in member_keys]
+#+        # Removing a reason removes each matching RFQ (including its CHF)
+#+        # from every other reason bar. Includes still highlight overlaps.
+#+        chart_keys = current_base
+#+        exclusions = {name: query[name] for name in ('exclude_reasons', 'exclude_details') if query[name]}
+#+        if exclusions:
+#+            chart_keys = engine.select(index, current_base, exclusions)['matched']
+#=        previous_keys = [key for key in matched if index['entries'][key]['row']['month'] == parent['previous_month']]
+#=        return {'parent': parent, 'baseline': baseline, 'current_base': current_base,
+#=                'selected': selected, 'breakdown_base': breakdown_base,
+#=                'matched': matched, 'query': query, 'reason_context': reason_context,
+#=                'now': _metrics(index, selected, population_current, available=month in parent['covered']),
+#=                'previous': _metrics(index, previous_keys, population_previous)
+#=                            if parent['previous_month'] in parent['covered'] else None,
+#=                'ytd': ytd_metrics(index, matched, parent['baseline'], month, parent['covered']),
+#-                'reason_records': engine.aggregate_reasons(index, current_base), 'available': month in parent['covered']}
+#+                'reason_records': engine.aggregate_reasons(index, chart_keys), 'available': month in parent['covered']}
+#=    return cached('selection', selection_token, selection_data)
+#=
+#=
+#=def _detail_results(index, data, state, metric):
+#=    reason = state.get('reason')
+#=    records = _engine().aggregate_details(index, data['reason_context'], reason=reason,
+#=                                         include_keys=False) if reason in index['reasons'] else []
+#=    brand_registry = registry_for(index.get('snapshot'))
+#=    search = str(state.get('detail_search') or '').strip().casefold()
+#=    records = [item for item in records if (item.get('count') or 0) > 0 and
+#=               (not search or search in display_text(item['label'], brand_registry).casefold())]
+#=    records.sort(key=lambda item: (item.get(metric) is None, -(item.get(metric) or 0),
+#=                                  item['label'].casefold(), item['id']))
+#=    page = state.get('detail_page', 0)
+#=    if state.get('_reveal_detail') and state.get('detail'):
+#=        position = next((n for n, item in enumerate(records) if item['id'] == state['detail']), None)
+#=        if position is not None: page = position // DETAIL_PAGE_SIZE
+#=    visible, page, pages, count = _page(records, page, DETAIL_PAGE_SIZE)
+#=    figure = bars(visible, metric, selected=state.get('detail'),
+#=                  empty='No recorded Details match this view' if reason else 'Select a Reason to inspect its Details')
+#=    return {'mm-details.figure': figure,
+#=            'mm-detail-title.children': 'Details · ' + index['reasons'][reason]['label'] if reason in index['reasons'] else 'Details',
+#=            'mm-detail-page-label.children': f'{page * DETAIL_PAGE_SIZE + 1 if count else 0}–{min((page + 1) * DETAIL_PAGE_SIZE, count)} of {count:,} Details',
+#=            'mm-detail-previous.disabled': page == 0, 'mm-detail-next.disabled': page + 1 >= pages}
+#=
+#=
+#=def _case_results(index, data, state, search='', *, evidence_only=False):
+#=    if not data.get('available', True):
+#=        return {'mm-case-table.data': [], 'mm-case-table.page_count': 1,
+#=                'mm-case-count.children': 'RFQ list unavailable for this report period',
+#=                'mm-case-detail.children': html.P('Report unavailable for the selected platform and month.', className='mm-muted')}
+#=    if not state.get('cases_open'):
+#=        return {'mm-case-table.data': [], 'mm-case-table.page_count': 1,
+#=                'mm-case-count.children': f"{len(data['selected']):,} matching RFQs · expand to inspect",
+#=                'mm-case-detail.children': []}
+#=    records = _case_records(index, data['selected'], search)
+#=    sort = state.get('case_sort') or []
+#=    allowed = {name for name, _, _ in CASE_SPECS}
+#=    def compare(left, right):
+#=        for order in sort:
+#=            field = order.get('column_id')
+#=            if field not in allowed: continue
+#=            if field == 'amount':
+#=                a = index['entries'][left['id']]['row'].get('notional_chf')
+#=                b = index['entries'][right['id']]['row'].get('notional_chf')
+#=            else:
+#=                a, b = str(left.get(field) or '').casefold(), str(right.get(field) or '').casefold()
+#=            if a is None or b is None:
+#=                result = 0 if a is None and b is None else 1 if a is None else -1
+#=            else:
+#=                result = (a > b) - (a < b)
+#=                if order.get('direction') == 'desc': result = -result
+#=            if result: return result
+#=        return (left['id'] > right['id']) - (left['id'] < right['id'])
+#=    if sort: records.sort(key=cmp_to_key(compare))
+#=    visible, page, pages, count = _page(records, state.get('case_page'), CASE_PAGE_SIZE)
+#=    available = {item['id'] for item in records}
+#=    selected_case = state.get('rfq_key')
+#=    if selected_case not in available:
+#=        selected_case = visible[0]['id'] if visible else None
+#=    detail = _case_detail(index, selected_case)
+#=    if evidence_only: return {'mm-case-detail.children': detail}
+#=    return {'mm-case-table.data': visible, 'mm-case-table.page_count': pages,
+#=            'mm-case-count.children': f'{page * CASE_PAGE_SIZE + 1 if count else 0}–{min((page + 1) * CASE_PAGE_SIZE, count)} of {count:,} matching RFQs',
+#=            'mm-case-detail.children': detail}
+#=
+#=
+#=@presented
+#=def render(slug, snapshot, platform, month, population, filters, state, options, *, index=None):
+#=    if slug != PAGE: return {}
+#=    engine = _engine()
+#=    index = index if index is not None else engine.build_index(snapshot)
+#=    options = options or {}
+#=    dimension = _option(options, 'mm-dimension')
+#=    dimension = dimension if dimension in DIMENSIONS else 'underlying'
+#=    state = for_breakdown_dimension(state, dimension)
+#=    breakdown_selection = _breakdown_selection(state)
+#=    query = _query(state, index)
+#=    partial = options.get('_missed_partial')
+#=    if partial == 'menu':
+#=        return {'mm-reason-menu.children': filter_menus(index, query, state)}
+#=    metric = _option(options, 'mm-metric')
+#=    metric = metric if metric in {'count', 'chf'} else CONTROL_DEFAULTS['mm-metric']
+#=    analysis = options.get('analysis_filters') or {}
+#=    base_selection_active = any(bool(values) for values in analysis.values()) or any(query.values())
+#=    selection_active = base_selection_active or bool(breakdown_selection)
+#=    data = _scope_data(index, snapshot, platform, month, population, filters, analysis, state)
+#=    parent, selected = data['parent'], data['selected']
+#=    covered = parent['covered']
+#=    current_available = month in covered
+#=    search = options['mm_case_search'] if 'mm_case_search' in options else state.get('case_search', '')
+#=    if partial in {'case', 'case_page'}:
+#=        return _case_results(index, data, state, search, evidence_only=partial == 'case')
+#=    if partial == 'detail_page':
+#=        return _detail_results(index, data, state, metric)
+#=    from coupon_lab.missed_timeline import timeline
+#=    daily = timeline(index, selected, month, available=current_available)
+#=    scope = timeline_scope(platform, month, population, filters, query, analysis, breakdown_selection)
+#=    day = state.get('timeline_day') if state.get('timeline_scope') == scope else None
+#=    timeline_chart, timeline_title, timeline_note, back_style = timeline_figure(daily, metric, day, active=selection_active)
+#=    timeline_updates = {'mm-timeline.figure': timeline_chart, 'mm-timeline-title.children': timeline_title,
+#=                        'mm-timeline-note.children': timeline_note, 'mm-timeline-back.style': back_style}
+#=    if partial == 'timeline': return timeline_updates
+#=    reason = state.get('reason') if state.get('reason') in index['reasons'] else None
+#=    detail = state.get('detail') if state.get('detail') in index['details'] else None
+#=    # Total bar lengths are the attribute-filtered baseline. Highlights are the
+#=    # effective selected RFQ intersection, so exclusions remain whole-RFQ rules.
+#=    overlap = selected if (breakdown_selection or detail or query['include_reasons'] or query['include_details']) else []
+#=    overlap_label = ('Selected breakdown overlap' if breakdown_selection else
+#=                     'Selected Detail overlap' if detail else 'Included Reason overlap')
+#=    reason_figure = reason_bars(index, data['reason_records'], overlap, metric, overlap_label=overlap_label)
+#=    breakdown = engine.breakdown(index, data['breakdown_base'], dimension, reason=reason, detail=detail,
+#=                                  spec=query, bands=snapshot.get('ticket_size_bands'))
+#=    attributed = dimension == 'underlying' and (reason == 'configuration' or
+#=        'configuration' in query['include_reasons'] or any(index['details'].get(token, {}).get('reason') == 'configuration'
+#=                                                        for token in query['include_details']))
+#=    breakdown_note = ('Affected constituents only; basket-wide constraints are shown separately.' if attributed else
+#=                      'Basket exposure. Select a configuration Reason for affected-constituent counts.') if dimension == 'underlying' else ''
+#=    if dimension == 'underlying':
+#=        breakdown_note += ' Constituent exposures overlap; do not add their CHF amounts.'
+#=    if breakdown:
+#=        click_hint = 'Click a bar to filter. Click it again to clear.'
+#=        breakdown_note = (breakdown_note + ' ' + click_hint).strip()
+#=    selection_label, full_selection_label = selection_title(index, state)
+#=    ytd = data['ytd']
+#=    def overall(summary):
+#=        return {'overall_missed_chf': summary.get('missed_chf'), 'overall_missed_rfqs': summary.get('missed_rfq_count'),
+#=                'overall_missed_rate': summary.get('missed_rate')}
+#=    overall_specs = [('overall_missed_chf', 'Overall missed volume', 'money'),
+#=                     ('overall_missed_rfqs', 'Overall missed RFQs', 'count'),
+#=                     ('overall_missed_rate', 'Overall size-weighted missed rate', 'rate')]
+#=    cards = [html.Div([html.H3('Overall population', className='mm-score-group-title'),
+#=                *_cards(overall(parent['current']), overall(parent['previous']), overall(parent['ytd']), ytd['label'], specs=overall_specs)],
+#=                className='mm-score-group'),
+#=             html.Div([html.H3('Current selection', className='mm-score-group-title'),
+# COPY BLOCK 9
+#=                *_cards(data['now'], data['previous'], ytd['metrics'], ytd['label'])],
+#=                className='mm-score-group' + (' is-active' if selection_active else ''))]
+#=    notes = []
+#=    if not current_available: notes.append('Report unavailable for the selected platform and month.')
+#=    if population == 'restricted': notes.append('Restricted scope excludes unsupported currencies and FX products; choose All report RFQs to include them.')
+#=    if (filters or {}).get('received'): notes.append('Received-only scope requires a matched SLD request.')
+#=    context = [html.Strong('Missed Opportunities · ' + selection_label, title=full_selection_label),
+#=        html.P(f"{len(selected):,} selected RFQs / {sum(index['entries'][key]['row']['month'] == month for key in parent['baseline']):,} population known misses." if current_available else
+#=               'Selected platform/month report unavailable. Current counts and CHF are not measured zero.'),
+#=        html.P('Analysis filters: ' + ('; '.join(name + ': ' + ', '.join(map(str, values)) for name, values in analysis.items() if values) or 'None')),
+#=        html.Div(active_filters(index, state, removable=False))]
+#=    selected_category = breakdown_selection['category'] if breakdown_selection else None
+#=    breakdown_figure = bars(breakdown, metric, selected=selected_category,
+#=                            empty='No matching breakdown categories', height=270,
+#=                            color='#298CFF' if base_selection_active and not breakdown_selection else c.BLUE)
+#=    for trace in breakdown_figure.data:
+#=        trace.customdata = [[*record, dimension] for record in trace.customdata]
+#=    detail_updates = _detail_results(index, data, state, metric)
+#=    if not current_available:
+#=        reason_figure = c.empty('Report unavailable for this platform and month', 320)
+#=        detail_updates['mm-details.figure'] = c.empty('Report unavailable for this platform and month', 320)
+#=        breakdown_figure = c.empty('Report unavailable for this platform and month', 270)
+#=    return {'mm-kpis.children': cards, **timeline_updates,
+#=        'mm-population-note.children': ' '.join(notes),
+#=        'mm-reason-menu.children': filter_menus(index, query, state),
+#=        'mm-reasons.figure': reason_figure, **detail_updates,
+#=        'mm-breakdown.figure': breakdown_figure, 'mm-breakdown-note.children': breakdown_note,
+#=        'mm-history.figure': history_figure(index, data['matched'], covered, metric, month, active=selection_active),
+#=        'mm-history-title.children': html.Span('Selected misses through time · ' + selection_label, title=full_selection_label),
+#=        **_case_results(index, data, state, search), 'mm-print-context.children': context}
+#=
+#=def transition(state, event, value, index):
+#=    """Atomic UI intentions; bulk selection stays compact across all pages."""
+#=    original = deepcopy(state or {})
+#=    state = deepcopy(original)
+#=    raw = _query(state)
+#=    effective = _query(state, index)
+#=    bulk = deepcopy(state.get('bulk') or {})
+#=    bulk.setdefault('details', {})
+#=    if event == 'clear': return {}
+#=    if event == 'breakdown' and not _breakdown_selection({'breakdown': value}):
+#=        return original
+#=    if event == 'detail' and value in index['details']:
+#=        if index['details'][value]['reason'] in effective['exclude_reasons']: return original
+#=    if event in {'filter', 'bulk'} and value.get('kind') == 'detail':
+#=        if value.get('reason') in effective['exclude_reasons']: return original
+#=    state.pop('rfq_key', None)
+#=    state.pop('timeline_day', None)
+#=    state.pop('timeline_scope', None)
+#=    state['detail_page'] = 0
+#=    state['_event'] = 'selection'
+#=    state['_reveal_detail'] = False
+#=
+#=    def choice(kind, parent):
+#=        return bulk.get('reasons') if kind == 'reason' else bulk['details'].get(parent)
+#=    def omit_default(kind, parent, token):
+#=        item = choice(kind, parent)
+#=        if item:
+#=            item['exceptions'] = list(dict.fromkeys((item.get('exceptions') or []) + [token]))
+#=    def clear_include_bulk(suffix):
+#=        if suffix == 'reasons' and bulk.get('reasons', {}).get('mode') == 'include': bulk.pop('reasons', None)
+#=        if suffix == 'details':
+#=            bulk['details'] = {parent: item for parent, item in bulk['details'].items() if item.get('mode') != 'include'}
+#=    if event == 'breakdown':
+#=        if _breakdown_selection(state) == value:
+#=            state.pop('breakdown')
+#=        else:
+#=            state['breakdown'] = value
+#=    elif event == 'bulk':
+#=        kind, mode, parent = value.get('kind'), value.get('mode'), value.get('reason', '')
+#=        if kind not in {'reason', 'detail'} or mode not in {'include', 'exclude'}: return original
+#=        if kind == 'reason':
+#=            bulk['reasons'] = {'mode': mode, 'exceptions': []}
+#=            raw['include_reasons'], raw['exclude_reasons'] = [], []
+#=            if mode == 'exclude':
+#=                raw['include_details'], raw['exclude_details'] = [], []
+#=                bulk['details'] = {}
+#=                state.pop('reason', None)
+#=                state.pop('detail', None)
+#=        elif parent in index['reasons']:
+#=            for group in ('include_details', 'exclude_details'):
+#=                raw[group] = [token for token in raw[group] if index['details'].get(token, {}).get('reason') != parent]
+#=            bulk['details'][parent] = {'mode': mode, 'exceptions': []}
+#=            state['reason'] = parent
+#=            state.pop('detail', None)
+#=    elif event == 'reason':
+#=        if value not in index['reasons']: return original
+#=        if state.get('reason') == value and effective['include_reasons'] == [value]:
+#=            raw['include_reasons'] = []
+#=            state.pop('reason', None)
+#=        else:
+#=            raw['include_reasons'] = [value]
+#=            raw['exclude_reasons'] = [token for token in raw['exclude_reasons'] if token != value]
+#=            state['reason'] = value
+#=            state.update(menu_reason=value, menu_page=0, menu_search='')
+#=        clear_include_bulk('reasons')
+#=        if bulk.get('reasons', {}).get('mode') == 'exclude': omit_default('reason', '', value)
+#=        raw['include_details'] = []
+#=        clear_include_bulk('details')
+#=        state.pop('detail', None)
+#=        state['detail_search'] = ''
+#=    elif event == 'detail':
+#=        if value not in index['details']: return original
+#=        parent = index['details'][value]['reason']
+#=        if state.get('detail') == value and effective['include_details'] == [value]:
+#=            raw['include_details'] = []
+#=            state.pop('detail', None)
+#=        else:
+#=            raw['include_details'] = [value]
+#=            raw['exclude_details'] = [token for token in raw['exclude_details'] if token != value]
+#=            state.update(detail=value, reason=parent, detail_search='', _reveal_detail=True)
+#=        clear_include_bulk('details')
+#=        if choice('detail', parent) and choice('detail', parent).get('mode') == 'exclude': omit_default('detail', parent, value)
+#=    elif event == 'filter':
+#=        kind, mode = value.get('kind'), value.get('mode')
+#=        if kind not in {'reason', 'detail'} or mode not in {'include', 'exclude'}: return original
+#=        token = value.get('reason') if kind == 'reason' else value.get('detail')
+#=        catalog = index['reasons'] if kind == 'reason' else index['details']
+#=        if token not in catalog: return original
+#=        parent = value.get('reason', '') if kind == 'detail' else ''
+#=        if kind == 'detail' and catalog[token]['reason'] != parent: return original
+#=        suffix = 'reasons' if kind == 'reason' else 'details'
+#=        group, other = mode + '_' + suffix, ('exclude' if mode == 'include' else 'include') + '_' + suffix
+#=        item = choice(kind, parent)
+#=        selected = token in effective[group]
+#=        if selected:
+#=            raw[group] = [existing for existing in raw[group] if existing != token]
+#=            if item and item.get('mode') == mode: omit_default(kind, parent, token)
+#=        else:
+#=            raw[other] = [existing for existing in raw[other] if existing != token]
+#=            if item and item.get('mode') == mode:
+#=                item['exceptions'] = [existing for existing in item.get('exceptions', []) if existing != token]
+#=            else:
+#=                raw[group] = list(dict.fromkeys(raw[group] + [token]))
+#=                if item: omit_default(kind, parent, token)
+#=        if kind == 'reason' and mode == 'exclude' and not selected:
+#=            for child_group in ('include_details', 'exclude_details'):
+#=                raw[child_group] = [child for child in raw[child_group] if index['details'].get(child, {}).get('reason') != token]
+#=            bulk['details'].pop(token, None)
+#=            if index['details'].get(state.get('detail'), {}).get('reason') == token: state.pop('detail', None)
+#=        if mode == 'include' and not selected:
+#=            if kind == 'reason': state['reason'] = token; state.update(menu_reason=token, menu_page=0, menu_search=''); state.pop('detail', None)
+#=            else: state.update(detail=token, menu_reason=parent, detail_search='', _reveal_detail=True)
+#=        elif kind == 'detail' and state.get('detail') == token: state.pop('detail', None)
+#=        elif kind == 'reason' and state.get('reason') == token: state.pop('reason', None); state.pop('detail', None)
+#=    elif event == 'remove':
+#=        group, token = value.get('group'), value.get('token')
+#=        if group == 'breakdown':
+#=            selection = _breakdown_selection(state)
+#=            if selection and token == selection['category']:
+#=                state.pop('breakdown')
+#=        elif group == 'bulk-reasons': bulk.pop('reasons', None)
+#=        elif group == 'bulk-details': bulk['details'].pop(token, None)
+#=        elif group in raw:
+#=            raw[group] = [existing for existing in raw[group] if existing != token]
+#=            if group == 'include_details' and state.get('detail') == token: state.pop('detail', None)
+#=            if group == 'include_reasons' and state.get('reason') == token: state.pop('reason', None); state.pop('detail', None)
+#=    state['query'] = raw
+#=    if bulk.get('reasons') or bulk.get('details'): state['bulk'] = bulk
+#=    else: state.pop('bulk', None)
+#=    return state
+#=
+#=
+#=def register_callbacks(app, snapshot, settings, index):
+#=    """One local reducer; light navigation triggers only its affected outputs."""
+#=    globals_ = [Input('platform', 'value'), Input('month', 'value'), Input('population', 'value')]
+#=    globals_ += [Input('filter-' + name, 'value') for name in BUSINESS_FILTERS]

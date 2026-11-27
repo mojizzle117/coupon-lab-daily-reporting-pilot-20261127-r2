@@ -1,0 +1,363 @@
+#=        normal = self.render()
+#=        reason = view.transition({}, 'reason', 'configuration', self.index)
+#=        selected = self.render(reason)
+#=        bright = '#298CFF'
+#=        for output in ('mm-timeline.figure', 'mm-breakdown.figure'):
+#=            self.assertTrue(all(color == bright for color in selected[output].data[0].marker.color))
+#=            self.assertTrue(all(color == view.c.BLUE for color in normal[output].data[0].marker.color))
+#=        history = selected['mm-history.figure'].data[0]
+#=        self.assertEqual(history.line.color, bright)
+#=        self.assertEqual(history.marker.color[-1], view.c.GOLD)  # Reporting month remains identified.
+#=        self.assertTrue(all(color == bright for color in history.marker.color[:-1]))
+#=        self.assertEqual(normal['mm-history.figure'].data[0].line.color, view.c.BLUE)
+#=        self.assertEqual(selected['mm-history.figure'].layout.yaxis.title.font.size, 10)
+#=        self.assertEqual(selected['mm-history.figure'].layout.yaxis.title.text, 'Associated requested CHF (m)')
+#=        # Reasons retain their dark baseline and light overlap. Details are not
+#=        # all bright merely because their parent Reason is selected.
+#=        self.assertEqual(selected['mm-reasons.figure'].data[0].marker.color, view.c.BLUE)
+#=        self.assertEqual(selected['mm-reasons.figure'].data[1].marker.color, bright)
+#=        self.assertTrue(all(color == view.c.BLUE for color in selected['mm-details.figure'].data[0].marker.color))
+#=        token = engine.detail_id('configuration', engine.CONFIG_DETAILS['absent'])
+#=        detail = self.render(view.transition(reason, 'detail', token, self.index))
+#=        trace = detail['mm-details.figure'].data[0]
+#=        for identifier, color in zip(trace.y, trace.marker.color):
+#=            self.assertEqual(color, bright if identifier == token else view.c.BLUE)
+#=        # An explicit filter covering the full fixture still signals an active
+#=        # subset without changing any amounts or plotted coordinates.
+#=        analysis = self.render(options={'analysis_filters': {'currency': ['CHF', 'JPY']}})
+#=        self.assertTrue(all(color == bright for color in analysis['mm-timeline.figure'].data[0].marker.color))
+#=        for output in ('mm-timeline.figure', 'mm-breakdown.figure', 'mm-history.figure'):
+#=            self.assertEqual(list(normal[output].data[0].x), list(analysis[output].data[0].x))
+#=            self.assertEqual(list(normal[output].data[0].y), list(analysis[output].data[0].y))
+#=        cleared = self.render(view.transition(reason, 'clear', None, self.index))
+#=        for output in ('mm-timeline.figure', 'mm-breakdown.figure', 'mm-history.figure'):
+#=            self.assertEqual(to_json(normal[output]), to_json(cleared[output]))
+#=
+#=    def test_navigation_and_inspection_do_not_activate_selection_kpis(self):
+#=        normal = self.render()
+#=        variants = [
+#=            ({'menu_reason': 'configuration', 'menu_search': 'configuration', 'menu_page': 2}, {}),
+#=            ({'detail_page': 1, 'detail_search': 'synthetic'}, {}),
+#=            ({'timeline_day': '2026-09-15', 'timeline_scope': 'synthetic-display-scope'}, {}),
+#=            ({'case_page': 1, 'case_search': 'hedge'}, {'mm_case_search': 'hedge'}),
+#=            ({'reason': 'configuration'}, {}),
+#=        ]
+#=        for state, options in variants:
+#=            with self.subTest(state=state):
+#=                result = self.render(state, options)
+#=                groups = json.loads(to_json(result['mm-kpis.children']))
+#=                self.assertNotIn('is-active', groups[0]['props']['className'])
+#=                self.assertNotIn('is-active', groups[1]['props']['className'])
+#=                self.assertEqual(to_json(metric_cards(normal['mm-kpis.children'])),
+#=                                 to_json(metric_cards(result['mm-kpis.children'])))
+#=
+#=    def test_reason_bar_click_filters_whole_rfqs_and_syncs_include(self):
+#=        state = view.transition({}, 'reason', 'configuration', self.index)
+#=        self.assertEqual(state['query']['include_reasons'], ['configuration'])
+#=        result = self.render(state)
+#=        self.assertEqual([item['rfq'] for item in result['mm-case-table.data']], ['config'])
+#=        self.assertIn('Underlying / Provider Configuration', result['mm-detail-title.children'])
+#=        self.assertIn('BAD SW', list(result['mm-breakdown.figure'].data[0].y))
+#=        self.assertNotIn('GOOD SW', list(result['mm-breakdown.figure'].data[0].y))
+#=        self.assertIn('Affected constituents only', result['mm-breakdown-note.children'])
+#=
+#=    def test_detail_menu_includes_all_reasons_despite_focused_reason_and_scopes_buttons(self):
+#=        result = self.render(view.transition({}, 'reason', 'configuration', self.index))
+#=        menu = json.loads(to_json(result['mm-reason-menu.children']))
+#=        ids = [item for item in pattern_ids(menu) if item.get('type') == 'mm-filter' and item.get('kind') == 'detail']
+#=        self.assertFalse(any(item['reason'] == 'validation:INVALID_PREMIUM' for item in ids))
+#=        other = self.render({'menu_reason': 'validation:INVALID_PREMIUM'})
+#=        self.assertIn('validation:INVALID_PREMIUM', to_json(other['mm-reason-menu.children']))
+#=        self.assertTrue(any(item['reason'] == 'configuration' for item in ids))
+#=        self.assertTrue(all(self.index['details'][item['detail']]['reason'] == item['reason'] for item in ids))
+#=        self.assertEqual(len(ids), len({json.dumps(item, sort_keys=True) for item in ids}))
+#=        self.assertIn('mm-hierarchy-parents', to_json(result['mm-reason-menu.children']))
+#=
+#=    def test_detail_action_filters_parent_scoped_pair_and_chip_preserves_path(self):
+#=        token = next(token for token, item in self.index['details'].items()
+#=                     if item['reason'] == 'validation:INVALID_PREMIUM')
+#=        action = {'kind': 'detail', 'mode': 'include', 'reason': 'validation:INVALID_PREMIUM', 'detail': token}
+#=        state = view.transition({}, 'filter', action, self.index)
+#=        result = self.render(state)
+#=        self.assertEqual([item['rfq'] for item in result['mm-case-table.data']], ['message'])
+#=        chips = view.active_filters(self.index, state['query'])
+#=        self.assertIn('INVALID_PREMIUM', to_json(chips))
+#=        self.assertIn('→', json.dumps(json.loads(to_json(chips)), ensure_ascii=False))
+#=        self.assertEqual(view.active_filters(self.index, {}), [])
+#=        self.assertEqual(view.active_filters(self.index, None), [])
+#=        wrong = view.transition({}, 'filter', {**action, 'reason': 'validation:MIN_STRIKE_VIOLATED'}, self.index)
+#=        self.assertEqual(wrong, {})
+#=
+#=    def test_include_exclude_switches_mode_without_contradictory_tokens(self):
+#=        action = {'kind': 'reason', 'mode': 'include', 'reason': 'configuration', 'detail': ''}
+#=        state = view.transition({}, 'filter', action, self.index)
+#=        state = view.transition(state, 'filter', {**action, 'mode': 'exclude'}, self.index)
+#=        self.assertEqual(state['query']['include_reasons'], [])
+#=        self.assertEqual(state['query']['exclude_reasons'], ['configuration'])
+#=        result = self.render(state)
+#=        self.assertNotIn('config', {item['rfq'] for item in result['mm-case-table.data']})
+#=        state = view.transition(state, 'remove', {'group': 'exclude_reasons', 'token': 'configuration'}, self.index)
+#=        self.assertEqual(state['query']['exclude_reasons'], [])
+#=        self.assertEqual(view.transition(state, 'clear', None, self.index), {})
+#=
+#=    def test_detail_chart_click_adds_detail_filter_and_repeat_click_clears_it(self):
+#=        reason = 'configuration'
+#=        token = engine.detail_id(reason, engine.CONFIG_DETAILS['absent'])
+#=        state = view.transition(view.transition({}, 'reason', reason, self.index), 'detail', token, self.index)
+#=        self.assertEqual(state['query']['include_details'], [token])
+#=        result = self.render(state)
+#=        self.assertEqual([item['rfq'] for item in result['mm-case-table.data']], ['config'])
+#=        state = view.transition(state, 'detail', token, self.index)
+#=        self.assertEqual(state['query']['include_details'], [])
+#=
+#=    def test_search_changes_case_list_only(self):
+#=        before, after = self.render(), self.render(options={'mm_case_search': 'hedge'})
+#=        self.assertEqual([item['rfq'] for item in after['mm-case-table.data']], ['hedge'])
+#=        for output in ('mm-kpis.children', 'mm-reasons.figure', 'mm-breakdown.figure', 'mm-history.figure'):
+#=            self.assertEqual(to_json(before[output]), to_json(after[output]))
+#=
+#=    def test_all_matching_metadata_reaches_native_sort_before_pagination(self):
+#=        template = deepcopy(self.snapshot['rows'][1])
+#=        for number in range(37):
+#=            row = deepcopy(template)
+#=            row.update(rfq_id='extra-' + str(number), notional_chf=Decimal(number + 1))
+#=            self.snapshot['rows'].append(row)
+#=        self.index = engine.build_index(self.snapshot)
+#=        result = self.render()
+#=        self.assertEqual(len(result['mm-case-table.data']), 16)
+#=        self.assertEqual(result['mm-case-table.page_count'], 3)
+#=        last = self.render({'case_page': 2})
+#=        self.assertEqual(len(last['mm-case-table.data']), 9)
+#=        self.assertEqual(result['mm-case-table.data'][0]['rfq'], 'message')
+#=        self.assertEqual(last['mm-case-table.data'][-1]['amount'], 1)
+#=
+#=    def test_quote_numbers_stay_hidden_and_source_messages_are_plain_components(self):
+#=        hedge_key = engine.key(self.snapshot['rows'][1])
+#=        result = self.render({'rfq_key': hedge_key})
+#=        serialized = to_json(result)
+#=        self.assertNotIn('NUMERIC_QUOTE_MUST_STAY_HIDDEN', serialized)
+#=        self.assertNotIn('NUMERIC_STRIKE_MUST_STAY_HIDDEN', serialized)
+#=        message_key = engine.key(self.snapshot['rows'][3])
+#=        detail = json.loads(to_json(view.case_detail(self.index, message_key)))
+#=        raw = to_json(detail)
+#=        self.assertIn('synthetic message', raw)
+#=        self.assertNotIn('dangerously_allow_html', raw)
+#=        result = self.render(view.transition({}, 'reason', 'validation:INVALID_PREMIUM', self.index))
+#=        hover = result['mm-details.figure'].data[0].customdata
+#=        self.assertTrue(any('&lt;script&gt;' in item[1] for item in hover))
+#=
+#=    def test_uncertain_exclusion_stays_internal_and_never_becomes_a_confirmed_match(self):
+#=        self.snapshot['source_coverage']['admin']['complete'] = False
+#=        self.index = engine.build_index(self.snapshot)
+#=        state = {'query': {'exclude_reasons': ['configuration']}}
+#=        normal = self.render(state)
+#=        self.assertEqual(normal['mm-case-table.data'], [])
+#=        result = engine.select(self.index, [engine.key(row) for row in self.snapshot['rows'] if row['month'] == '2026-09'],
+#=                               {'exclude_reasons': ['configuration']})
+#=        self.assertEqual(len(result['uncertain']), 4)
+#=        self.assertNotIn('mm-summary.children', normal)
+#=        self.assertNotIn('Filter assessment', to_json(view.layouts(self.snapshot, {})))
+#=
+#=    def test_missing_chf_does_not_remove_rfq_or_become_zero_share(self):
+#=        self.snapshot['rows'][0]['notional_chf'] = None
+#=        self.index = engine.build_index(self.snapshot)
+#=        result = self.render(view.transition({}, 'reason', 'configuration', self.index))
+#=        self.assertEqual(len(result['mm-case-table.data']), 1)
+#=        self.assertIsNone(result['mm-case-table.data'][0]['amount'])
+#=        self.assertIn('—', json.dumps(json.loads(to_json(result['mm-kpis.children'])), ensure_ascii=False))
+#=        records = {item['id']: item for item in engine.aggregate_reasons(self.index, [engine.key(self.snapshot['rows'][0])])}
+#=        self.assertIsNone(records['configuration']['chf'])
+#=
+#=    def test_history_uses_same_selection_and_preserves_missing_calendar_month(self):
+#=        for row in self.snapshot['rows']:
+#=            if row['month'] == '2026-09': row['month'] = '2026-10'
+#=        self.snapshot['months'] = ['2026-08', '2026-10']
+#=        self.snapshot['source_coverage']['platform_months']['PLATFORM_A'] = ['2026-08', '2026-10']
+#=        self.index = engine.build_index(self.snapshot)
+#=        result = self.render(view.transition({}, 'reason', 'configuration', self.index),
+#=                             options={'mm_metric': 'count'}, month='2026-10')
+#=        trace = result['mm-history.figure'].data[0]
+#=        self.assertEqual(list(trace.x), ['2026-08', '2026-09', '2026-10'])
+#=        self.assertEqual(list(trace.y), [1.0, None, 1.0])
+#=        self.assertFalse(trace.connectgaps)
+#=
+#=    def test_restricted_scope_explains_hidden_unsupported_currency_cases(self):
+#=        result = self.render(population='restricted')
+#=        self.assertNotIn('currency', {item['rfq'] for item in result['mm-case-table.data']})
+#=        self.assertIn('excludes unsupported currencies', result['mm-population-note.children'])
+#=
+#=    def test_whole_basket_constraint_is_not_assigned_to_all_constituents(self):
+# COPY BLOCK 13
+#=        row = self.snapshot['rows'][0]
+#=        row['admin_support'] = [
+#=            {'symbol': 'BAD SW', 'status': 'Current snapshot match', 'ISSUER': 1, 'PROVIDER_A': 0, 'PROVIDER_B': 0, 'PROVIDER_C': 0},
+#=            {'symbol': 'GOOD SW', 'status': 'Current snapshot match', 'ISSUER': 0, 'PROVIDER_A': 1, 'PROVIDER_B': 0, 'PROVIDER_C': 0}]
+#=        self.index = engine.build_index(self.snapshot)
+#=        result = self.render(view.transition({}, 'reason', 'configuration', self.index))
+#=        self.assertEqual(list(result['mm-breakdown.figure'].data[0].y), ['Whole basket · no common provider'])
+#=
+#=    def test_unavailable_current_month_is_not_reported_as_zero(self):
+#=        result = self.render(month='2026-10')
+#=        cards = list(metric_cards(result['mm-kpis.children']).values())
+#=        self.assertTrue(all(item['children'][1]['props']['children'] == '—' for item in cards))
+#=        self.assertIn('Report unavailable', result['mm-population-note.children'])
+#=        for name in ('mm-reasons.figure', 'mm-details.figure', 'mm-breakdown.figure'):
+#=            self.assertEqual(len(result[name].data), 0)
+#=            self.assertIn('Report unavailable', result[name].layout.annotations[0].text)
+#=        self.assertIn('unavailable', result['mm-case-count.children'])
+#=        self.assertIn('not measured zero', to_json(result['mm-print-context.children']))
+#=        # Covered August/September history remains actual evidence; no October
+#=        # zero is manufactured simply because its report is unavailable.
+#=        self.assertEqual(list(result['mm-history.figure'].data[0].x), ['2026-08', '2026-09'])
+#=
+#=    def test_covered_empty_month_remains_a_measured_zero(self):
+#=        self.snapshot['rows'] = [row for row in self.snapshot['rows'] if row['month'] == '2026-08']
+#=        self.index = engine.build_index(self.snapshot)
+#=        result = self.render()
+#=        cards = list(metric_cards(result['mm-kpis.children']).values())
+#=        count_card = next(item for item in cards if item['data-metric'] == 'selected_missed_rfqs')
+#=        self.assertEqual(count_card['children'][1]['props']['children'], '0')
+#=        self.assertEqual(result['mm-case-count.children'], '0–0 of 0 matching RFQs')
+#=
+#=    def test_history_and_print_titles_describe_complete_or_query_not_last_focus(self):
+#=        query = {'include_reasons': ['configuration', 'currency'],
+#=                 'exclude_reasons': ['validation:INVALID_PREMIUM']}
+#=        state = {'query': query, 'reason': 'currency'}
+#=        result = self.render(state)
+#=        title = json.loads(to_json(result['mm-history-title.children']))['props']
+#=        for text in ('Underlying / Provider Configuration', 'Unsupported Currency', ' OR ', 'INVALID_PREMIUM'):
+#=            self.assertIn(text, title['children'])
+#=            self.assertIn(text, title['title'])
+#=        heading = json.loads(to_json(result['mm-print-context.children']))[0]['props']
+#=        self.assertIn('Underlying / Provider Configuration', heading['children'])
+#=        self.assertIn('Unsupported Currency', heading['children'])
+#=        self.assertIn('INVALID_PREMIUM', heading['children'])
+#=
+#=    def test_assessed_zero_categories_stay_in_menus_but_do_not_fill_reason_detail_plots(self):
+#=        self.snapshot['opportunity_reason_rules'] = [{'Source': 'validation', 'Code': 'MAX_STRIKE_VIOLATED'}]
+#=        self.index = engine.build_index(self.snapshot)
+#=        result = self.render(view.transition({}, 'reason', 'configuration', self.index))
+#=        self.assertNotIn('validation:MAX_STRIKE_VIOLATED', list(result['mm-reasons.figure'].data[0].y))
+#=        self.assertIn('MAX_STRIKE_VIOLATED', to_json(result['mm-reason-menu.children']))
+#=        zero_detail = engine.detail_id('configuration', engine.CONFIG_DETAILS['no_provider'])
+#=        self.assertNotIn(zero_detail, list(result['mm-details.figure'].data[0].y))
+#=        self.assertIn(zero_detail, to_json(result['mm-reason-menu.children']))
+#=
+#=    def test_unestablished_zero_categories_do_not_reintroduce_assessment_labels(self):
+#=        self.snapshot['source_coverage']['admin']['complete'] = False
+#=        self.index = engine.build_index(self.snapshot)
+#=        result = self.render()
+#=        trace = result['mm-reasons.figure'].data[0]
+#=        self.assertNotIn('configuration', list(trace.y))
+#=        self.assertIn('Underlying / Provider Configuration',
+#=                      json.dumps(json.loads(to_json(result['mm-reason-menu.children'])), ensure_ascii=False))
+#=        self.assertNotIn('assessment unavailable', to_json(result['mm-reasons.figure']))
+#=        self.assertNotIn('Unassessable', trace.hovertemplate)
+#=
+#=    def test_plot_filter_keeps_every_positive_category_without_truncation(self):
+#=        records = [{'id': 'positive-' + str(number), 'label': 'Synthetic positive ' + str(number),
+#=                    'count': 1, 'chf': Decimal(100), 'unknown_count': 0} for number in range(95)]
+#=        records += [{'id': 'unknown-' + str(number), 'label': 'Synthetic unknown ' + str(number),
+#=                     'count': 0, 'chf': Decimal(0), 'unknown_count': 1} for number in range(5)]
+#=        records.append({'id': 'zero', 'label': 'Assessed zero', 'count': 0, 'chf': Decimal(0), 'unknown_count': 0})
+#=        figure = view.bars(records, omit_assessed_zeros=True)
+#=        self.assertEqual(len(figure.data[0].y), 95)
+#=        self.assertNotIn('zero', list(figure.data[0].y))
+#=
+#+    def test_reason_exclusion_removes_overlapping_rfqs_from_count_and_chf(self):
+#+        self.snapshot['rows'][0]['observations'].append({'source': 'validation',
+#+            'code': 'FAILED_TO_HEDGE', 'message': 'Synthetic second reason'})
+#+        self.index = engine.build_index(self.snapshot)
+#+        state = {'query': {'exclude_reasons': ['configuration']}}
+#+        for metric, original, remaining in [('count', 2, 1), ('chf', .0003, .0002)]:
+#+            def amounts(state):
+#+                fig = self.render(state, options={'mm_metric': metric})['mm-reasons.figure']
+#+                return dict(zip(fig.data[0].y, fig.data[0].x))
+#+            self.assertAlmostEqual(amounts({})[engine.FAILED_TO_HEDGE], original)
+#+            filtered = amounts(state)
+#+            self.assertNotIn('configuration', filtered)
+#+            self.assertAlmostEqual(filtered[engine.FAILED_TO_HEDGE], remaining)
+#+
+#=    def test_reason_baselines_stay_fixed_and_overlap_uses_included_reason_union(self):
+#=        self.snapshot['rows'][0]['observations'].append({'source': 'validation', 'code': 'FAILED_TO_HEDGE',
+#=                                                        'message': 'Additional recorded hedge constraint'})
+#=        self.index = engine.build_index(self.snapshot)
+#=        before = self.render(options={'mm_metric': 'count'})
+#=        state = view.transition({}, 'reason', 'configuration', self.index)
+#=        selected = self.render(state, options={'mm_metric': 'count'})
+#=        before_figure, after_figure = before['mm-reasons.figure'], selected['mm-reasons.figure']
+#=        self.assertEqual(list(before_figure.data[0].y), list(after_figure.data[0].y))
+#=        self.assertEqual([sum(values) for values in zip(*(trace.x for trace in before_figure.data))],
+#=                         [sum(values) for values in zip(*(trace.x for trace in after_figure.data))])
+#=        failed_position = list(after_figure.data[0].y).index(engine.FAILED_TO_HEDGE)
+#=        self.assertEqual(after_figure.data[0].x[failed_position], 1)
+#=        self.assertEqual(after_figure.data[1].x[failed_position], 1)
+#=        self.assertEqual(after_figure.data[1].marker.color, '#298CFF')
+#=        state = view.transition(state, 'filter', {'kind': 'reason', 'mode': 'include',
+#=                                'reason': engine.FAILED_TO_HEDGE, 'detail': ''}, self.index)
+#=        union = self.render(state, options={'mm_metric': 'count'})['mm-reasons.figure']
+#=        position = list(union.data[0].y).index(engine.FAILED_TO_HEDGE)
+#=        self.assertEqual(union.data[1].x[position], 2)  # Shared RFQ is counted once in the union.
+#=
+#=    def test_detail_click_changes_lower_population_but_neither_upper_chart(self):
+#=        second = deepcopy(self.snapshot['rows'][1])
+#=        second.update(rfq_id='hedge-second', notional_chf=Decimal(250))
+#=        second['providers'][0]['errors'] = [{'VALIDATION_CODE': 'OTHER_PROVIDER_ERROR'}]
+#=        self.snapshot['rows'].append(second)
+#=        self.index = engine.build_index(self.snapshot)
+#=        state = view.transition({}, 'reason', engine.FAILED_TO_HEDGE, self.index)
+#=        before = self.render(state)
+#=        token = engine.detail_id(engine.FAILED_TO_HEDGE, 'SYNTHETIC_PROVIDER_ERROR', 'PROVIDER_A')
+#=        state = view.transition(state, 'detail', token, self.index)
+#=        after = self.render(state)
+#=        self.assertEqual(len(before['mm-case-table.data']), 2)
+#=        self.assertEqual([item['rfq'] for item in after['mm-case-table.data']], ['hedge'])
+#=        self.assertEqual([sum(values) for values in zip(*(trace.x for trace in before['mm-reasons.figure'].data))],
+#=                         [sum(values) for values in zip(*(trace.x for trace in after['mm-reasons.figure'].data))])
+#=        self.assertNotEqual(to_json(before['mm-reasons.figure']), to_json(after['mm-reasons.figure']))
+#=        self.assertEqual(list(before['mm-details.figure'].data[0].x), list(after['mm-details.figure'].data[0].x))
+#=        self.assertEqual(after['mm-details.figure'].data[0].marker.color[
+#=            list(after['mm-details.figure'].data[0].y).index(token)], '#298CFF')
+#=        self.assertIn('Selected Detail overlap', to_json(after['mm-reasons.figure']))
+#=        self.assertNotEqual(to_json(before['mm-kpis.children']), to_json(after['mm-kpis.children']))
+#=
+#=    def test_failed_hedge_details_and_menu_use_linked_provider_codes(self):
+#=        hedge, other = (self.snapshot['rows'][index] for index in (1, 3))
+#=        hedge['observations'][0]['message'] = 'Connection failed in synthetic fixture'
+#=        hedge['providers'][0]['errors'] *= 2
+#=        other['providers'] = [{'provider': 'PROVIDER_B', 'part_type': 'DIP', 'detail_id': 'H-2',
+#=                              'errors': [{'VALIDATION_CODE': 'OTHER_PROVIDER_ERROR'}]}]
+#=        self.index = engine.build_index(self.snapshot)
+#=        state = view.transition({}, 'reason', engine.FAILED_TO_HEDGE, self.index)
+#=        selected = self.render(state, options={'mm_metric': 'count'})
+#=        token = engine.detail_id(engine.FAILED_TO_HEDGE, 'SYNTHETIC_PROVIDER_ERROR', 'PROVIDER_A')
+#=        series = selected['mm-details.figure'].data[0]
+#=        self.assertEqual((series.y, series.x), ((token,), (1,)))
+#=        details = self.index['detail_catalog'][engine.FAILED_TO_HEDGE]
+#=        self.assertEqual({item['label'] for item in details.values()}, {'PROVIDER_A · SYNTHETIC_PROVIDER_ERROR'})
+#=        menu = to_json(selected['mm-reason-menu.children'])
+#=        self.assertIn('SYNTHETIC_PROVIDER_ERROR', menu)
+#=        self.assertNotIn('OTHER_PROVIDER_ERROR', menu)
+#=        self.assertNotIn('Connection failed in synthetic fixture', menu)
+#=        evidence = to_json(view.case_detail(self.index, engine.key(hedge)))
+#=        self.assertIn('Connection failed in synthetic fixture', evidence)
+#=
+#=    def test_hedge_details_resolve_the_provider_name_and_preserve_the_error_code(self):
+#=        from test_brand_ui import invented_repository
+#=
+#=        self.snapshot['_brand_repository'] = invented_repository()
+#=        hedge = self.snapshot['rows'][1]
+#=        hedge['providers'][0]['errors'] = ['ISSUER_EXACT_ERROR']
+#=        self.index = engine.build_index(self.snapshot)
+#=        state = view.transition({}, 'reason', engine.FAILED_TO_HEDGE, self.index)
+#=        selected = self.render(state)
+#=        series = selected['mm-details.figure'].data[0]
+#=        token = engine.detail_id(engine.FAILED_TO_HEDGE, 'ISSUER_EXACT_ERROR', 'PROVIDER_A')
+#=        self.assertEqual(series.customdata[0][0], token)
+#=        self.assertIn('Gamma Hedge · ISSUER_EXACT_ERROR', series.text)
+#=        self.assertIn('Gamma Hedge · ISSUER_EXACT_ERROR', json.dumps(
+#=            json.loads(to_json(selected['mm-case-detail.children'])), ensure_ascii=False))
+#=        evidence = json.dumps(json.loads(to_json(view.case_detail(self.index, engine.key(hedge)))), ensure_ascii=False)
+#=        self.assertIn('Gamma Hedge · ISSUER_EXACT_ERROR', evidence)
+#=
+#=    def test_breakdown_click_filters_periods_and_keeps_the_chart_totals(self):

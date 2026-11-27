@@ -1,0 +1,466 @@
+#+import sqlite3
+#+import tempfile
+#+import unittest
+#+from unittest.mock import patch
+#+
+#+from coupon_lab import daily_source as daily
+#+
+#+
+#+DAY = date(2026, 11, 26)
+#+
+#+
+#+def settings():
+#+    return {"daily_reporting": {"source": {"profile_confirmed": True}},
+#+            "sld": {"roles": {"hedges": {"table": "SLD_PRODUCT_HEDGE_DETAIL"}}, "chunk_size": 500}}
+#+
+#+
+#+def trade(**changes):
+#+    row = {"RFQ_ID": "R1", "PRODUCT_ID": "P1", "PRODUCT_STATE": "ACTIVE",
+#+           "INITIAL_FIXING": DAY, "FLOW_PROFILE": "Manual", "PRODUCT_TYPE": "Fictional RC",
+#+           "AMOUNT": "600000", "CURRENCY": "CHF", "UNDERLYINGS": "Fictional A / Fictional B",
+# COPY BLOCK 21
+#+           "PLATFORM": "Fictional voice", "PNL_NATIVE": None}
+#+    return {**row, **changes}
+#+
+#+
+#+CHF = {"CHF": {"rate": Decimal(1), "month": None, "source": "CHF identity"}}
+#+
+#+
+#+def calculate(trades=None, requests=None, providers=None, cfg=None, fx=None):
+#+    return daily._calculate(cfg or settings(), DAY, requests or [],
+#+                            trades if trades is not None else [trade()], providers or [], fx or CHF)
+#+
+#+
+#+class DailyCalculationTests(unittest.TestCase):
+#+    def test_request_count_distinct_rounds_and_unmatched_product(self):
+#+        rows = [{"RFQ_ID": "001", "REQUEST_CREATED_AT": DAY, "FLOW_PROFILE": "Manual"},
+#+                {"RFQ_ID": "002", "REQUEST_CREATED_AT": DAY, "FLOW_PROFILE": "Platform A"},
+#+                {"RFQ_ID": "003", "REQUEST_CREATED_AT": DAY, "FLOW_PROFILE": None}]
+#+        result = calculate(trades=[], requests=rows + [dict(rows[0])])
+#+        self.assertEqual(result["requests"], {"eflow": 1, "voiceflow": 1, "unknown": 1})
+#+        self.assertEqual(result["coverage"]["duplicate_request_rows"], 1)
+#+
+#+    def test_profile_unconfirmed_has_provisional_figures(self):
+#+        cfg = settings()
+#+        cfg["daily_reporting"]["source"]["profile_confirmed"] = False
+#+        result = calculate(cfg=cfg)
+#+        self.assertEqual(result["trades"][0]["flow"], "voiceflow")
+#+        self.assertTrue(result["trades"][0]["flow_provisional"])
+#+        self.assertTrue(any("unverified" in message for message in result["warnings"]))
+#+
+#+    def test_unknown_profile_markers_and_optional_known_set(self):
+#+        for profile in (None, "", "Unknown", "Ambiguous", "manual", "Manual "):
+#+            self.assertEqual(calculate(trades=[trade(FLOW_PROFILE=profile)])["trades"][0]["flow"], "unknown")
+#+        cfg = settings()
+#+        cfg["daily_reporting"]["source"]["known_eflow_profiles"] = ["Platform A"]
+#+        self.assertEqual(calculate(cfg=cfg, trades=[trade(FLOW_PROFILE="New profile")])["trades"][0]["flow"], "unknown")
+#+
+#+    def test_request_outside_day_fails(self):
+#+        row = {"RFQ_ID": "R", "REQUEST_CREATED_AT": date(2026, 11, 25), "FLOW_PROFILE": "Manual"}
+#+        with self.assertRaises(daily.DailySourceError):
+#+            calculate(requests=[row])
+#+
+#+    def test_conflicting_duplicate_request_profile_counts_once_as_unknown(self):
+#+        rows = [{"RFQ_ID": "R", "REQUEST_CREATED_AT": DAY, "FLOW_PROFILE": value}
+#+                for value in ("Manual", "Platform A")]
+#+        result = calculate(requests=rows)
+#+        self.assertEqual(result["requests"], {"eflow": 0, "voiceflow": 0, "unknown": 1})
+#+
+#+    def test_duplicate_trade_legs_do_not_multiply_notional(self):
+#+        result = calculate(trades=[trade(AMOUNT=Decimal("600000.00")), trade(AMOUNT=600000)])
+#+        self.assertEqual(len(result["trades"]), 1)
+#+        self.assertEqual(result["trades"][0]["chf"], "600000")
+#+        self.assertEqual(result["coverage"]["duplicate_trade_rows"], 1)
+#+
+#+    def test_conflicting_amount_makes_trade_section_incomplete(self):
+#+        result = calculate(trades=[trade(), trade(AMOUNT="700000")])
+#+        self.assertFalse(result["coverage"]["trades_complete"])
+#+        self.assertEqual(result["trades"], [])
+#+        self.assertEqual(result["coverage"]["unresolved_trade_groups"], 1)
+#+
+#+    def test_one_product_linked_to_two_rfqs_is_unresolved(self):
+#+        result = calculate(trades=[trade(), trade(RFQ_ID="R2")])
+#+        self.assertFalse(result["coverage"]["trades_complete"])
+#+        self.assertEqual(result["trades"], [])
+#+
+#+    def test_orphan_issued_product_is_visible_and_requests_remain_readable(self):
+#+        requests = [{"RFQ_ID": "R", "REQUEST_CREATED_AT": DAY, "FLOW_PROFILE": "Manual"}]
+#+        result = calculate(trades=[trade(RFQ_ID=None)], requests=requests)
+#+        self.assertEqual(result["requests"]["voiceflow"], 1)
+#+        self.assertFalse(result["coverage"]["trades_complete"])
+#+        self.assertEqual(result["unresolved_trades"][0]["product_id"], "P1")
+#+
+#+    def test_trade_eligibility_and_fixing_day_are_validated(self):
+#+        for changes in ({"PRODUCT_STATE": "CANCELLED"}, {"INITIAL_FIXING": date(2026, 11, 25)},
+#+                        {"INITIAL_FIXING": "1900-01-01"}):
+#+            with self.subTest(changes=changes), self.assertRaises(daily.DailySourceError):
+#+                calculate(trades=[trade(**changes)])
+#+
+#+    def test_provider_selected_option_leg_is_provisional(self):
+#+        providers = [{"PRODUCT_ID": "P1", "COUNTERPARTY": "Fictional provider",
+#+                      "PART_TYPE": "TRS", "IS_WINNER": 1}]
+#+        result = calculate(providers=providers)
+#+        self.assertEqual(result["trades"][0]["provider"], "Fictional provider")
+#+        self.assertTrue(result["trades"][0]["provider_provisional"])
+#+
+#+    def test_repeated_same_provider_is_not_ambiguous(self):
+#+        providers = [{"PRODUCT_ID": "P1", "COUNTERPARTY": "Fictional provider",
+#+                      "PART_TYPE": part, "IS_WINNER": 1} for part in ("TRS", "PUT")]
+#+        self.assertEqual(calculate(providers=providers)["trades"][0]["provider"], "Fictional provider")
+#+
+#+    def test_reviewed_default_provider_is_confirmed(self):
+#+        cfg = settings()
+#+        cfg["daily_reporting"]["source"]["provider_confirmed"] = True
+#+        providers = [{"PRODUCT_ID": "P1", "COUNTERPARTY": "Fictional provider", "PART_TYPE": "TRS", "IS_WINNER": 1}]
+#+        item = calculate(cfg=cfg, providers=providers)["trades"][0]
+#+        self.assertEqual(item["provider"], "Fictional provider")
+#+        self.assertFalse(item["provider_provisional"])
+#+
+#+    def test_ambiguous_provider_remains_unknown(self):
+#+        providers = [{"PRODUCT_ID": "P1", "COUNTERPARTY": name,
+#+                      "PART_TYPE": "TRS", "IS_WINNER": 1} for name in ("Fictional A", "Fictional B")]
+#+        result = calculate(providers=providers)
+#+        self.assertEqual(result["trades"][0]["provider"], "")
+#+        self.assertEqual(result["coverage"]["missing"]["ambiguous_provider"], 1)
+#+
+#+    def test_explicit_executed_provider_requires_confirmation(self):
+#+        cfg = settings()
+#+        self.assertEqual(calculate(trades=[trade(PROVIDER="Fictional executed")])["trades"][0]["provider"], "")
+#+        cfg["daily_reporting"]["source"]["provider_confirmed"] = True
+#+        item = calculate(cfg=cfg, trades=[trade(PROVIDER="Fictional executed")])["trades"][0]
+#+        self.assertEqual(item["provider"], "Fictional executed")
+#+        self.assertFalse(item["provider_provisional"])
+#+
+#+    def test_missing_amount_and_missing_fx_preserve_rows(self):
+#+        rows = [trade(AMOUNT=None), trade(RFQ_ID="R2", PRODUCT_ID="P2", CURRENCY="JPY")]
+#+        result = calculate(trades=rows)
+#+        self.assertEqual(len(result["trades"]), 2)
+#+        self.assertIsNone(result["trades"][0]["amount"])
+#+        self.assertTrue(all(item["chf"] is None for item in result["trades"]))
+#+
+#+    def test_no_margin_scale_means_unknown_pnl(self):
+#+        item = calculate(trades=[trade(MARGIN_PA="1", LIFETIME_YEARS="2")])["trades"][0]
+#+        self.assertIsNone(item["pnl_chf"])
+#+
+#+    def test_float_storage_is_explicit(self):
+#+        result = calculate(trades=[trade(AMOUNT=600000.25)])
+#+        self.assertEqual(result["trades"][0]["amount"], "600000.25")
+#+        self.assertEqual(result["coverage"]["floating_numeric_inputs"], 1)
+#+        self.assertTrue(any("source precision" in warning for warning in result["warnings"]))
+#+
+#+    def test_configured_margin_and_lifetime_calculate_exact_pnl(self):
+#+        cfg = settings()
+#+        cfg["daily_reporting"]["source"]["margin_scale"] = "0.01"
+#+        fx = {"EUR": {"rate": Decimal("0.95"), "month": "2026-10", "source": "Fictional"}}
+#+        item = calculate(cfg=cfg, fx=fx, trades=[trade(AMOUNT="1000000", CURRENCY="EUR", MARGIN_PA="1", LIFETIME_YEARS="1.5")])["trades"][0]
+#+        self.assertEqual(item["pnl"], "15000")
+#+        self.assertEqual(item["pnl_chf"], "14250")
+#+        self.assertEqual(item["chf"], "950000")
+#+
+#+    def test_direct_pnl_zero_and_negative_are_retained(self):
+#+        rows = [trade(PNL_NATIVE="0"), trade(RFQ_ID="R2", PRODUCT_ID="P2", PNL_NATIVE="-10.25")]
+#+        items = calculate(trades=rows)["trades"]
+#+        self.assertEqual([item["pnl_chf"] for item in items], ["0", "-10.25"])
+#+
+#+    def test_invalid_financial_values_are_not_coerced(self):
+#+        for value in ("NaN", "Infinity", "1%", "1,000", True):
+#+            with self.subTest(value=value), self.assertRaises(daily.DailySourceError):
+#+                calculate(trades=[trade(AMOUNT=value)])
+#+
+#+    def test_negative_notional_requires_separate_cancellation_rule(self):
+#+        with self.assertRaises(daily.DailySourceError):
+#+            calculate(trades=[trade(AMOUNT="-1")])
+#+
+#+    def test_aware_event_dates_use_zurich(self):
+#+        self.assertEqual(daily._day(datetime(2026, 11, 25, 23, 30, tzinfo=timezone.utc), "test", "date"), DAY)
+#+        self.assertEqual(daily._day("20261126", "test", "date"), DAY)
+#+        self.assertEqual(daily._day("2026-W48-4", "test", "date"), DAY)
+#+
+#+    def test_demo_is_date_aware_json_safe_and_has_threshold_boundaries(self):
+#+        result = daily.demo_day(DAY)
+#+        self.assertEqual(result["day"], DAY.isoformat())
+#+        self.assertEqual([item["chf"] for item in result["trades"][:2]], ["500000", "500001"])
+#+        self.assertTrue(all(item["initial_fixing"] == DAY.isoformat() for item in result["trades"]))
+#+        json.dumps(result)
+#+
+#+    def test_dst_day_windows_are_local_calendar_boundaries(self):
+#+        result = daily.demo_day(date(2026, 3, 29))
+#+        self.assertTrue(result["window"]["start"].endswith("+01:00"))
+#+        self.assertTrue(result["window"]["end"].endswith("+02:00"))
+#+
+#+
+#+class SQLiteOfficeConnection:
+#+    """Fictional DB-API fixture running the real generated SELECT statements."""
+#+    autocommit = False
+#+
+#+    def __init__(self, path):
+#+        self.connection = sqlite3.connect(path)
+#+        self.statements = []
+#+
+#+    def cursor(self):
+#+        return SQLiteOfficeCursor(self, self.connection.cursor())
+#+
+#+    def rollback(self):
+#+        self.connection.rollback()
+#+
+#+    def close(self):
+#+        self.connection.close()
+#+
+#+
+#+class SQLiteOfficeCursor:
+#+    def __init__(self, owner, cursor):
+#+        self.owner, self.cursor = owner, cursor
+#+
+#+    def execute(self, sql, parameters=None):
+#+        self.owner.statements.append(sql)
+#+        if sql == "SET TRANSACTION READ ONLY":
+#+            self.cursor.execute("PRAGMA query_only=ON")
+#+            self.cursor.execute("BEGIN")
+#+        else:
+#+            params = {key: value.isoformat(sep=" ") if isinstance(value, datetime) else value
+#+                      for key, value in (parameters or {}).items()}
+#+            self.cursor.execute(sql, params)
+#+        return self
+#+
+#+    @property
+#+    def description(self):
+#+        return self.cursor.description
+#+
+#+    def fetchmany(self, size):
+#+        return self.cursor.fetchmany(size)
+#+
+#+    def close(self):
+#+        self.cursor.close()
+#+
+#+
+#+class DailyReadTests(unittest.TestCase):
+#+    def setUp(self):
+#+        self.temporary = tempfile.TemporaryDirectory()
+#+        self.root = Path(self.temporary.name)
+#+        self.addCleanup(self.temporary.cleanup)
+#+        self.cfg = settings()
+#+        self.cfg["_root"] = self.root
+#+        self.cfg["references"] = {"fx": "fx.csv"}
+#+        (self.root / "fx.csv").write_text(
+#+            "Month,Currency,CHF_per_unit,Source,Reviewed\n"
+#+            "2026-08,EUR,0.93,Fictional,true\n2026-10,EUR,0.95,Fictional,true\n"
+#+            "2026-09,USD,0.8,Fictional,true\n2026-11,EUR,,Pending,true\n"
+#+            "2026-12,EUR,0.99,Fictional,true\n2026-10,USD,0.9,Fictional,false\n",
+#+            encoding="utf-8")
+#+        self.database = self.root / "sld.sqlite"
+#+        with sqlite3.connect(self.database) as connection:
+#+            connection.executescript("""
+#+                CREATE TABLE SLD_PRODUCT (ID TEXT, STATE TEXT, INITIAL_FIXING TEXT,
+#+                    USER_PROFILE_NAME TEXT, PRODUCT_TYPE TEXT, PRODUCT_AMOUNT TEXT, CURRENCY TEXT);
+#+                CREATE TABLE SLD_QUOTE_REQUEST (ID TEXT, CREATETSTMP TEXT, ISSUE_ID TEXT,
+#+                    UNDERLYINGS TEXT, REQUESTOR TEXT);
+#+                CREATE TABLE SLD_PRODUCT_HEDGE_DETAIL (PRODUCT_ID TEXT, COUNTERPARTY TEXT,
+#+                    PART_TYPE TEXT, IS_WINNER INTEGER);
+#+                INSERT INTO SLD_PRODUCT VALUES
+#+                  ('P1','ACTIVE','2026-11-26 00:00:00','Manual','Fictional RC','1000000','EUR'),
+#+                  ('P2','ISSUING','2026-11-26 12:00:00','Platform A','Fictional BRC','600000','CHF'),
+#+                  ('P3','ACTIVE','2026-11-27 00:00:00','Platform A','Fictional RC','1','CHF'),
+#+                  ('P4','CANCELLED','2026-11-26 00:00:00','Platform A','Fictional RC','2','CHF');
+#+                INSERT INTO SLD_QUOTE_REQUEST VALUES
+#+                  ('R1','2026-11-01 10:00:00','P1','FICTIONAL A / FICTIONAL B','Voice'),
+#+                  ('R2','2026-11-26 09:00:00','P2','FICTIONAL C','Platform A'),
+#+                  ('R3','2026-11-26 11:00:00',NULL,'FICTIONAL D','Unknown'),
+#+                  ('R4','2026-11-27 00:00:00','P3','FICTIONAL E','Platform A');
+#+                INSERT INTO SLD_PRODUCT_HEDGE_DETAIL VALUES
+#+                  ('P1','Fictional provider A','TRS',1),
+#+                  ('P1','Other provider','PUT',0),
+#+                  ('P1','Funding provider','BOND',1),
+#+                  ('P2','Fictional internal provider','DIP',1);
+#+            """)
+#+
+#+    def test_latest_available_reviewed_fx_is_selected_per_currency(self):
+#+        rates = daily._fx(self.cfg, DAY)
+#+        self.assertEqual(rates["EUR"]["month"], "2026-10")
+#+        self.assertEqual(rates["USD"]["month"], "2026-09")
+#+        self.assertEqual(rates["CHF"]["rate"], 1)
+#+
+#+    def test_real_default_selects_separate_creation_and_fixing_cohorts(self):
+#+        connection = SQLiteOfficeConnection(self.database)
+#+        with patch.object(daily, "_factory", return_value=lambda: connection):
+#+            result = daily.read_day(self.cfg, DAY)
+#+        self.assertEqual(result["requests"], {"eflow": 1, "voiceflow": 0, "unknown": 1})
+#+        self.assertEqual({item["id"] for item in result["trades"]}, {"R1", "R2"})
+#+        old = next(item for item in result["trades"] if item["id"] == "R1")
+#+        self.assertEqual(old["chf"], "950000")
+#+        self.assertEqual(old["underlyings"], "FICTIONAL A / FICTIONAL B")
+#+        self.assertEqual(old["provider"], "Fictional provider A")
+#+        self.assertIsNone(old["pnl_chf"])
+#+        self.assertEqual(connection.statements[0], "SET TRANSACTION READ ONLY")
+#+        json.dumps(result)
+#+
+#+    def test_missing_canonical_alias_fails_clearly(self):
+#+        self.cfg["daily_reporting"]["source"]["request_sql"] = "SELECT ID FROM SLD_QUOTE_REQUEST"
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            with self.assertRaisesRegex(daily.DailySourceError, "canonical aliases"):
+#+                daily.read_day(self.cfg, DAY)
+#+
+#+    def test_bounded_read_never_publishes_truncated_result(self):
+#+        self.cfg["daily_reporting"]["source"]["max_rows"] = 1
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            with self.assertRaisesRegex(daily.DailySourceError, "row limit"):
+#+                daily.read_day(self.cfg, DAY)
+#+
+#+    def test_db_error_omits_raw_query_exception(self):
+#+        self.cfg["daily_reporting"]["source"]["trade_sql"] = "SELECT SECRET_PAYLOAD FROM MISSING_SOURCE"
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            with self.assertRaises(daily.DailySourceError) as caught:
+#+                daily.read_day(self.cfg, DAY)
+#+        self.assertNotIn("SECRET_PAYLOAD", str(caught.exception))
+#+        self.assertNotIn("MISSING_SOURCE", str(caught.exception))
+#+
+#+    def test_missing_fx_reference_retains_cohort_counts_native_amounts_and_chf_identity(self):
+#+        self.cfg["references"]["fx"] = "missing.csv"
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            result = daily.read_day(self.cfg, DAY)
+#+        self.assertEqual(result["requests"], {"eflow": 1, "voiceflow": 0, "unknown": 1})
+#+        trades = {item["id"]: item for item in result["trades"]}
+# COPY BLOCK 22
+#+        self.assertEqual(trades["R1"]["amount"], "1000000")
+#+        self.assertIsNone(trades["R1"]["chf"])
+#+        self.assertEqual(trades["R2"]["chf"], "600000")
+#+        self.assertFalse(result["coverage"]["fx_reference_available"])
+#+        self.assertTrue(result["coverage"]["trades_complete"])
+#+        self.assertTrue(any("FX reference unavailable" in message for message in result["warnings"]))
+#+
+#+    def test_malformed_fx_reference_does_not_block_independent_request_counts(self):
+#+        (self.root / "fx.csv").write_text("Month,Currency,CHF_per_unit,Source\n2026-10,EUR,not-a-rate,Fictional\n", encoding="utf-8")
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            result = daily.read_day(self.cfg, DAY)
+#+        self.assertEqual(sum(result["requests"].values()), 2)
+#+        self.assertEqual(len(result["trades"]), 2)
+#+        self.assertFalse(result["coverage"]["fx_reference_available"])
+#+        self.assertNotIn("not-a-rate", " ".join(result["warnings"]))
+#+
+#+    def test_failed_hedge_enrichment_keeps_both_cohorts_and_native_amounts(self):
+#+        self.cfg["sld"]["roles"]["hedges"]["table"] = "MISSING_PROVIDER_SOURCE"
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            result = daily.read_day(self.cfg, DAY)
+#+        self.assertEqual(sum(result["requests"].values()), 2)
+#+        self.assertEqual(len(result["trades"]), 2)
+#+        self.assertTrue(all(item["provider"] == "" for item in result["trades"]))
+#+        self.assertEqual(next(item["chf"] for item in result["trades"] if item["id"] == "R1"), "950000")
+#+        self.assertFalse(result["coverage"]["hedge_enrichment_available"])
+#+        self.assertTrue(result["coverage"]["trades_complete"])
+#+        self.assertNotIn("MISSING_PROVIDER_SOURCE", " ".join(result["warnings"]))
+#+
+#+    def test_invalid_selected_provider_evidence_is_isolated(self):
+#+        invalid = [{"PRODUCT_ID": "P1", "COUNTERPARTY": "Fictional", "PART_TYPE": "BOND", "IS_WINNER": 1}]
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)), \
+#+                patch.object(daily, "_provider_rows", return_value=invalid):
+#+            result = daily.read_day(self.cfg, DAY)
+#+        self.assertEqual(len(result["trades"]), 2)
+#+        self.assertFalse(result["coverage"]["hedge_enrichment_available"])
+#+
+#+    def test_missing_request_table_remains_fatal_even_with_optional_fx_failure(self):
+#+        self.cfg["references"]["fx"] = "missing.csv"
+#+        self.cfg["sld"]["roles"]["requests"] = {"table": "MISSING_REQUEST_SOURCE"}
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            with self.assertRaises(daily.DailySourceError):
+#+                daily.read_day(self.cfg, DAY)
+#+
+#+    def test_default_sql_has_no_created_day_or_fee_gate_for_trades(self):
+#+        requests, trades = daily.default_queries(self.cfg)
+#+        self.assertIn("LEFT JOIN", requests)
+#+        self.assertNotIn("p.STATE IN", requests)
+#+        self.assertIn("p.INITIAL_FIXING >= :day_start", trades)
+#+        self.assertNotIn("r.CREATETSTMP >=", trades)
+#+        self.assertNotIn("ISS_FEE", trades)
+#+        self.assertIn("NULL AS PNL_NATIVE", trades)
+#+
+#+    def test_configured_financial_sql_expressions_use_documented_aliases(self):
+#+        options = self.cfg["daily_reporting"]["source"]
+#+        options.update({"margin_expression": "'1'", "lifetime_years_expression": "'1.5'", "margin_scale": "0.01"})
+#+        with patch.object(daily, "_factory", return_value=lambda: SQLiteOfficeConnection(self.database)):
+#+            result = daily.read_day(self.cfg, DAY)
+#+        item = next(row for row in result["trades"] if row["id"] == "R1")
+#+        self.assertEqual(item["pnl"], "15000")
+#+        self.assertEqual(item["pnl_chf"], "14250")
+#+
+#+    def test_office_sql_file_override_resolves_relative_to_root(self):
+#+        query = "SELECT confirmed_daily_fields FROM fictional_office_view WHERE fixing >= :day_start"
+#+        (self.root / "daily_trade.sql").write_text(query, encoding="utf-8")
+#+        self.cfg["daily_reporting"]["source"]["trade_sql_file"] = "daily_trade.sql"
+#+        self.assertEqual(daily.default_queries(self.cfg)[1], query)
+#+        self.cfg["daily_reporting"]["source"]["trade_sql"] = query
+#+        with self.assertRaises(daily.DailySourceError):
+#+            daily.default_queries(self.cfg)
+#+
+#+
+#+if __name__ == "__main__":
+#+    unittest.main()
+# FILE {"kind": "app", "name": "tests/test_daily_service.py", "new_lf": true}
+#+"""Synthetic end-to-end checks for two desktop sessions and the capture CLI."""
+#+from datetime import date
+#+from pathlib import Path
+#+import sys
+#+import tempfile
+#+import unittest
+#+from unittest.mock import patch
+#+
+#+ROOT = Path(__file__).resolve().parents[1]
+#+sys.path.insert(0, str(ROOT))
+#+from coupon_lab.daily import DailyService
+#+import run_coupon_lab
+#+
+#+
+#+def sample(cfg, day):
+#+    return {"day": day.isoformat(), "read_at": "2026-11-27T15:00:00+01:00",
+#+            "requests": {"eflow": 2, "voiceflow": 1, "unknown": 0}, "warnings": [],
+#+            "trades": [{"id": "R-1", "flow": "voiceflow", "product_type": "RC",
+#+                        "amount": "700000", "currency": "CHF", "underlyings": "ABC",
+#+                        "provider": "Internal", "platform": "Manual", "chf": "700000", "pnl_chf": None}]}
+#+
+#+
+#+class DailyServiceTests(unittest.TestCase):
+#+    def setUp(self):
+#+        folder = tempfile.TemporaryDirectory()
+#+        self.addCleanup(folder.cleanup)
+#+        self.cfg = {"_root": Path(folder.name), "daily_reporting": {"store": "shared/pilot.sqlite3"}}
+#+        self.a, self.b = DailyService(self.cfg), DailyService(self.cfg)
+#+        self.day = "2026-11-27"
+#+        self.enterContext(patch.object(DailyService, "today", return_value=date.fromisoformat(self.day)))
+#+        self.reader = self.enterContext(patch("coupon_lab.daily.read_day", side_effect=sample))
+#+
+#+    def test_first_morning_capture_then_shared_manual_edits(self):
+#+        yesterday = self.a.previous_day().isoformat()
+#+        self.assertEqual(yesterday, "2026-11-26")
+#+        self.assertEqual(self.a.load(yesterday)["source_state"], "missing")
+#+        self.reader.assert_not_called()
+#+        with patch("coupon_lab.config.load_settings", return_value=self.cfg):
+#+            self.assertEqual(run_coupon_lab.main(["daily-capture", "--date", yesterday]), 0)
+#+        self.a.capture(yesterday)
+#+        self.assertEqual(self.reader.call_count, 1)
+#+        view = self.b.load(yesterday)
+#+        self.assertEqual(view["source_state"], "saved")
+#+        self.assertEqual(view["voiceflow"]["trade_count"], 1)
+#+        values = {"event_type": "issuance", "product_type": "RC", "currency": "CHF", "amount": "700000",
+#+                  "provider": "Internal", "underlyings": "ABC", "trade_id": "R-1"}
+#+        self.a.add(yesterday, values, "first-action")
+#+        self.a.add(yesterday, values, "first-action")
+#+        linked = self.b.load(yesterday)
+#+        self.assertEqual(linked["voiceflow"]["trade_count"], 1)
+#+        self.assertEqual(len(linked["subscription_issuances"]), 1)
+#+        self.assertEqual(linked["voiceflow_trades"], [])
+#+        row, = linked["manual_entries"]
+#+        self.b.remove(yesterday, row["id"], row["revision"], "another-action")
+#+        self.assertEqual(len(self.a.load(yesterday)["voiceflow_trades"]), 1)
+#+        self.assertEqual(self.a.load(yesterday)["read_at"], view["read_at"])
+#+        self.assertEqual(self.reader.call_count, 1)
+#+
+#+    def test_live_failure_preserves_last_read_and_new_manual_additions(self):
+#+        last = self.a.load(self.day)
+#+        self.reader.side_effect = OSError("sensitive driver payload")
+#+        self.b.add(self.day, {"event_type": "win", "product_type": "BRC", "currency": "CHF",
+#+                             "provider": "Internal", "underlyings": "ABC", "amount": None}, "new-win")
+#+        view = self.a.load(self.day)
+#+        self.assertEqual(view["read_at"], last["read_at"])
+#+        self.assertIn("SLD refresh failed", view["refresh_error"])
+#+        self.assertNotIn("sensitive", str(view))
+#+        self.assertEqual(len(view["subscription_wins"]), 1)
+#+        self.assertEqual(view["voiceflow"]["trade_count"], 1)
+#+

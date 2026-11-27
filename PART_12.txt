@@ -1,0 +1,470 @@
+#+import re
+#+from zoneinfo import ZoneInfo
+#+
+#+from .config import SQL_IDENTIFIER
+#+from .errors import PipelineError
+#+from .sources import _dedicated_connection
+#+
+#+
+#+REQUEST_COLUMNS = ("RFQ_ID", "REQUEST_CREATED_AT", "FLOW_PROFILE")
+#+TRADE_COLUMNS = ("RFQ_ID", "PRODUCT_ID", "PRODUCT_STATE", "INITIAL_FIXING",
+#+                 "FLOW_PROFILE", "PRODUCT_TYPE", "AMOUNT", "CURRENCY",
+#+                 "UNDERLYINGS", "PLATFORM")
+#+PROVIDER_COLUMNS = ("PRODUCT_ID", "COUNTERPARTY", "PART_TYPE", "IS_WINNER")
+#+TRADE_STATES = {"ACTIVE", "ISSUING"}
+#+OPTION_PARTS = {"TRS", "DIP", "PUT"}
+#+NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?\Z")
+#+MONTH = re.compile(r"\d{4}-(?:0[1-9]|1[0-2])\Z")
+#+
+#+
+#+class DailySourceError(PipelineError):
+#+    """Authored stage/field/action text with no query or driver payload."""
+#+    safe_message = True
+#+
+#+
+#+def _fail(role, field, problem, action):
+#+    raise DailySourceError(f"[daily source] {role} / {field}: {problem}. Next: {action}.") from None
+#+
+#+
+#+def _root(cfg):
+#+    return Path(cfg.get("_root", ".")).resolve()
+#+
+#+
+#+def _options(cfg):
+#+    daily = cfg.get("daily_reporting", {})
+#+    if not isinstance(daily, dict) or not isinstance(daily.get("source", {}), dict):
+#+        _fail("settings", "daily_reporting.source", "expected an object", "restore the daily source settings")
+#+    return daily.get("source", {})
+#+
+#+
+#+def _report_date(day):
+#+    if isinstance(day, datetime) or not isinstance(day, date):
+#+        _fail("report", "day", "expected a date", "pass the explicitly selected report date")
+#+    return day
+#+
+#+
+#+def _zurich():
+#+    try:
+#+        return ZoneInfo("Europe/Zurich")
+#+    except Exception:
+#+        _fail("dates", "timezone", "Zurich timezone data is unavailable", "use the approved environment with Europe/Zurich timezone data")
+#+
+#+
+#+def _day(value, role, field):
+#+    if isinstance(value, datetime):
+#+        return value.astimezone(_zurich()).date() if value.tzinfo is not None else value.date()
+#+    if isinstance(value, date):
+#+        return value
+#+    if isinstance(value, str) and value.strip():
+#+        text = value.strip()
+#+        try:
+#+            # date first preserves date-only ISO basic and week-date precision.
+#+            return date.fromisoformat(text)
+#+        except ValueError:
+#+            pass
+#+        try:
+#+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+#+            return _day(parsed, role, field)
+#+        except ValueError:
+#+            pass
+#+        for form in ("%d.%m.%Y", "%d.%m.%Y %H:%M:%S", "%m/%d/%Y %I:%M:%S.%f %p"):
+#+            try:
+#+                return datetime.strptime(text, form).date()
+#+            except ValueError:
+#+                continue
+#+    _fail(role, field, "missing or invalid event date", "verify the selected source field and its date representation")
+#+
+#+
+#+def _identifier(value, role, field):
+#+    if isinstance(value, bool) or value is None or isinstance(value, float):
+#+        _fail(role, field, "missing or inexact RFQ/product identity", "return the confirmed ID as integer or exact text")
+#+    if isinstance(value, Decimal):
+#+        if not value.is_finite() or value != value.to_integral_value():
+#+            _fail(role, field, "invalid numeric identity", "return an exact integer identifier")
+#+        return format(value, "f").split(".")[0]
+#+    if isinstance(value, (str, int)) and str(value).strip():
+#+        return str(value)
+#+    _fail(role, field, "invalid identity type", "return the confirmed ID as integer or exact text")
+#+
+#+
+#+def _decimal(value, role, field, *, optional=True):
+#+    if value is None or isinstance(value, str) and not value.strip():
+#+        if optional:
+#+            return None
+#+        _fail(role, field, "required numeric value missing", "complete the configured numeric input")
+#+    if isinstance(value, bool) or not isinstance(value, (str, int, float, Decimal)):
+#+        _fail(role, field, "invalid numeric type", "return a plain numeric value under the agreed unit")
+#+    text = str(value).strip()
+#+    try:
+#+        parsed = Decimal(text) if NUMBER.fullmatch(text) else None
+#+    except InvalidOperation:
+#+        parsed = None
+#+    if parsed is None or not parsed.is_finite():
+#+        _fail(role, field, "invalid numeric value", "review units and separators; use finite decimal input")
+#+    return parsed
+#+
+#+
+#+def _text(value):
+#+    return "" if value is None else str(value)
+#+
+#+
+#+def _number_text(value):
+#+    if value is None:
+#+        return None
+#+    if value.is_zero():
+#+        return "0"
+#+    text = format(value, "f")
+#+    return text.rstrip("0").rstrip(".") if "." in text else text
+#+
+#+
+#+def _flow(value, options):
+#+    if not isinstance(value, str) or not value.strip():
+#+        return "unknown"
+#+    if value != "Manual" and value.strip().casefold() == "manual":
+#+        return "unknown"
+#+    if value.strip().lower() in {"unknown", "unmapped", "ambiguous", "null", "none", "n/a"}:
+#+        return "unknown"
+#+    known = options.get("known_eflow_profiles")
+#+    if known is not None and value != "Manual" and value not in known:
+#+        return "unknown"
+#+    return "voiceflow" if value == "Manual" else "eflow"
+#+
+#+
+#+def _table(cfg, role, default):
+#+    name = cfg.get("sld", {}).get("roles", {}).get(role, {}).get("table", default)
+#+    if not isinstance(name, str) or not SQL_IDENTIFIER.fullmatch(name):
+#+        _fail(role, "table", "invalid configured table identifier", "use the approved exact table or view name")
+#+    return name
+#+
+#+
+#+def _expression(options, key, default):
+#+    value = options.get(key, default)
+#+    if not isinstance(value, str) or not value.strip():
+#+        _fail("settings", key, "expected an SQL expression", "supply the confirmed office expression or omit the override")
+#+    return value
+#+
+#+
+#+def default_queries(cfg):
+#+    """Return testable Oracle SELECTs without opening a connection."""
+#+    options = _options(cfg)
+#+    requests = _table(cfg, "requests", "SLD_QUOTE_REQUEST")
+#+    products = _table(cfg, "products", "SLD_PRODUCT")
+#+    profile = _expression(options, "flow_profile_expression", "p.USER_PROFILE_NAME")
+#+    underlyings = _expression(options, "underlyings_expression", "r.UNDERLYINGS")
+#+    pnl = _expression(options, "pnl_expression", "NULL")
+#+    margin = _expression(options, "margin_expression", "NULL")
+#+    lifetime = _expression(options, "lifetime_years_expression", "NULL")
+#+    provider = _expression(options, "provider_expression", "NULL")
+#+    request_sql = f"""SELECT r.ID AS RFQ_ID, r.CREATETSTMP AS REQUEST_CREATED_AT,
+#+        {profile} AS FLOW_PROFILE
+#+        FROM {requests} r LEFT JOIN {products} p ON p.ID = r.ISSUE_ID
+#+        WHERE r.CREATETSTMP >= :day_start AND r.CREATETSTMP < :day_end"""
+#+    trade_sql = f"""SELECT r.ID AS RFQ_ID, p.ID AS PRODUCT_ID,
+#+        p.STATE AS PRODUCT_STATE, p.INITIAL_FIXING AS INITIAL_FIXING,
+#+        {profile} AS FLOW_PROFILE, p.PRODUCT_TYPE AS PRODUCT_TYPE,
+#+        p.PRODUCT_AMOUNT AS AMOUNT, p.CURRENCY AS CURRENCY,
+#+        {underlyings} AS UNDERLYINGS, r.REQUESTOR AS PLATFORM,
+#+        {provider} AS PROVIDER, {pnl} AS PNL_NATIVE,
+#+        {margin} AS MARGIN_PA, {lifetime} AS LIFETIME_YEARS
+#+        FROM {products} p LEFT JOIN {requests} r ON r.ISSUE_ID = p.ID
+#+        WHERE p.INITIAL_FIXING >= :day_start AND p.INITIAL_FIXING < :day_end
+#+        AND p.STATE IN ('ACTIVE', 'ISSUING')"""
+#+    return (_query_override(cfg, options, "request", request_sql),
+#+            _query_override(cfg, options, "trade", trade_sql))
+#+
+#+
+#+def _query_override(cfg, options, role, default):
+#+    inline, filename = role + "_sql", role + "_sql_file"
+#+    if inline in options and filename in options:
+#+        _fail("settings", role + " SQL", "both inline and file overrides supplied", "choose one office query override")
+#+    if filename not in options:
+#+        return _expression(options, inline, default)
+#+    try:
+#+        path = Path(options[filename])
+#+        path = path if path.is_absolute() else _root(cfg) / path
+#+        text = path.read_text(encoding="utf-8-sig")
+#+        if not text.strip():
+#+            raise ValueError()
+#+        return text
+#+    except Exception:
+#+        _fail("settings", filename, "office query file is unavailable or empty", "check its configured path and approved SELECT aliases")
+#+
+#+
+#+def _factory(cfg):
+#+    module_name = cfg.get("sld", {}).get("connection_module", "office_connection.py")
+#+    try:
+#+        path = Path(module_name)
+#+        path = path if path.is_absolute() else _root(cfg) / path
+#+        spec = importlib.util.spec_from_file_location("coupon_lab_daily_office_connection", path)
+#+        module = importlib.util.module_from_spec(spec)
+#+        spec.loader.exec_module(module)
+#+        factory = module.open_connection
+#+        if not callable(factory):
+#+            raise TypeError()
+#+        return factory
+#+    except Exception:
+#+        _fail("SLD", "connection hook", "approved hook could not be loaded", "check the existing office connection module internally")
+#+
+#+
+#+def _fetch(connection, sql, parameters, required, role, limit):
+#+    cursor = None
+#+    try:
+#+        cursor = connection.cursor()
+#+        cursor.execute(sql, parameters)
+#+        headers = [str(item[0]).upper() for item in cursor.description]
+#+        if len(set(headers)) != len(headers) or set(required) - set(headers):
+#+            _fail(role, "columns", "missing or duplicate canonical aliases", "compare the SELECT aliases with the daily source module contract")
+#+        rows = []
+#+        while True:
+#+            batch = cursor.fetchmany(1000)
+#+            if not batch:
+#+                return rows
+#+            rows.extend(dict(zip(headers, values)) for values in batch)
+#+            if len(rows) > limit:
+#+                _fail(role, "row limit", "selected read exceeded its configured limit", "review the day predicate and the approved daily row limit")
+#+    except PipelineError:
+#+        raise
+#+    except Exception:
+#+        _fail(role, "read", "read-only query failed", "check exact source fields, aliases and the approved reader internally")
+#+    finally:
+#+        if cursor is not None:
+#+            cursor.close()
+#+
+#+
+#+def _provider_rows(connection, cfg, trade_rows, limit):
+#+    products = sorted({_identifier(row["PRODUCT_ID"], "trades", "PRODUCT_ID") for row in trade_rows})
+#+    if not products:
+#+        return []
+#+    table = _table(cfg, "hedges", "SLD_PRODUCT_HEDGE_DETAIL")
+#+    size = cfg.get("sld", {}).get("chunk_size", 500)
+#+    if type(size) is not int or not 1 <= size <= 1000:
+#+        _fail("settings", "chunk_size", "invalid chunk size", "use an approved integer between 1 and 1000")
+#+    rows = []
+#+    for position in range(0, len(products), size):
+#+        chunk = products[position:position + size]
+#+        binds = {f"p{index}": value for index, value in enumerate(chunk)}
+#+        terms = ",".join(":" + key for key in binds)
+#+        sql = f"SELECT PRODUCT_ID, COUNTERPARTY, PART_TYPE, IS_WINNER FROM {table} WHERE PRODUCT_ID IN ({terms}) AND IS_WINNER = 1 AND PART_TYPE IN ('TRS','DIP','PUT')"
+#+        rows.extend(_fetch(connection, sql, binds, PROVIDER_COLUMNS, "hedges", limit))
+#+        if len(rows) > limit:
+#+            _fail("hedges", "row limit", "linked reads exceeded the configured limit", "review linked multiplicity and the approved limit")
+#+    return rows
+#+
+#+
+#+def _fx(cfg, day):
+#+    """Select each currency's latest nonblank reviewed factor <= report month."""
+#+    month = day.strftime("%Y-%m")
+#+    configured = cfg.get("references", {}).get("fx", "reference/fx_rates.csv")
+#+    try:
+#+        path = Path(configured)
+#+        path = path if path.is_absolute() else _root(cfg) / path
+#+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+#+            reader = csv.DictReader(handle)
+#+            if not {"Month", "Currency", "CHF_per_unit", "Source"}.issubset(reader.fieldnames or []):
+#+                _fail("FX", "columns", "monthly rate headers are missing", "use the existing reviewed FX reference format")
+#+            rows = list(reader)
+#+    except PipelineError:
+#+        raise
+#+    except Exception:
+#+        _fail("FX", "reference", "monthly FX input is unavailable", "check the configured reviewed rate file")
+#+    found, seen = {}, set()
+#+    for row in rows:
+#+        rate_month, currency = row["Month"], row["Currency"]
+#+        if (not isinstance(rate_month, str) or not MONTH.fullmatch(rate_month)
+#+                or not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency)):
+#+            _fail("FX", "Month/Currency", "invalid rate identity", "correct the monthly rate reference")
+#+        key = rate_month, currency
+#+        if key in seen:
+#+            _fail("FX", "Month/Currency", "duplicate rate identity", "keep one reviewed factor per currency and month")
+#+        seen.add(key)
+#+        factor = _decimal(row["CHF_per_unit"], "FX", "CHF_per_unit")
+#+        if (factor is not None and factor <= 0 or currency == "CHF" and factor != 1
+#+                or currency != "CHF" and not _text(row.get("Source")).strip()):
+#+            _fail("FX", "factor/provenance", "invalid rate or missing provenance", "supply positive reviewed factors, with CHF exactly one")
+#+        reviewed = row.get("Reviewed", "true").strip().lower() in {"true", "yes", "1"}
+#+        if not reviewed or factor is None or rate_month > month:
+# COPY BLOCK 16
+#+            continue
+#+        if currency not in found or rate_month > found[currency]["month"]:
+#+            found[currency] = {"rate": factor, "month": rate_month, "source": row["Source"]}
+#+    found["CHF"] = {"rate": Decimal(1), "month": None, "source": "CHF identity"}
+#+    return found
+#+
+#+
+#+def _provider_index(rows):
+#+    grouped = {}
+#+    for row in rows:
+#+        product = _identifier(row["PRODUCT_ID"], "hedges", "PRODUCT_ID")
+#+        if row["PART_TYPE"] not in OPTION_PARTS or row["IS_WINNER"] not in (1, Decimal(1)):
+#+            _fail("hedges", "selected option evidence", "row outside the selected-option contract", "check the hedge query and flag representation")
+#+        name = _text(row["COUNTERPARTY"]).strip()
+#+        if name:
+#+            grouped.setdefault(product, set()).add(name)
+#+    return grouped
+#+
+#+
+#+def _calculate(cfg, day, requests, trades, providers, fx):
+#+    options = _options(cfg)
+#+    confirmed = options.get("profile_confirmed", False)
+#+    if type(confirmed) is not bool or type(options.get("provider_confirmed", False)) is not bool:
+#+        _fail("settings", "confirmation flags", "expected true or false", "use JSON booleans for source confirmations")
+#+    warnings = []
+#+    known = options.get("known_eflow_profiles")
+#+    if known is not None and (not isinstance(known, list) or any(not isinstance(value, str) or not value for value in known)):
+#+        _fail("settings", "known_eflow_profiles", "expected a list of exact profile labels", "supply confirmed labels or omit the optional restriction")
+#+    if not confirmed:
+#+        warnings.append("Flow profile mapping is unverified; category figures are provisional and must be reconciled before use.")
+#+    parents = {}
+#+    for row in requests:
+#+        identity = _identifier(row["RFQ_ID"], "requests", "RFQ_ID")
+#+        if _day(row["REQUEST_CREATED_AT"], "requests", "REQUEST_CREATED_AT") != day:
+#+            _fail("requests", "day window", "query returned an out-of-day request", "correct the Zurich creation-day predicate")
+#+        value = _flow(row["FLOW_PROFILE"], options)
+#+        if identity in parents and parents[identity] != value:
+#+            parents[identity] = "unknown"
+#+            warnings.append("A request has conflicting profile observations and is counted once under Unknown flow.")
+#+        else:
+#+            parents[identity] = value
+#+    counts = {flow: sum(value == flow for value in parents.values()) for flow in ("eflow", "voiceflow", "unknown")}
+#+    provider_map = _provider_index(providers)
+#+    result, product_owners, links, unresolved, blocked = {}, {}, [], {}, set()
+#+    duplicate_trades = 0
+#+    float_inputs = sum(isinstance(row.get(field), float) for row in trades
+#+                       for field in ("AMOUNT", "PNL_NATIVE", "MARGIN_PA", "LIFETIME_YEARS"))
+#+    for index, row in enumerate(trades):
+#+        try:
+#+            identity = _identifier(row["RFQ_ID"], "trades", "RFQ_ID")
+#+        except DailySourceError:
+#+            identity = None
+#+        try:
+#+            product = _identifier(row["PRODUCT_ID"], "trades", "PRODUCT_ID")
+#+        except DailySourceError:
+#+            product = None
+#+        links.append((identity, product))
+#+        if product and identity:
+#+            product_owners.setdefault(product, set()).add(identity)
+#+    ambiguous_products = {product for product, identities in product_owners.items() if len(identities) > 1}
+#+    scale = _decimal(options.get("margin_scale"), "settings", "margin_scale")
+#+    if scale is not None and scale <= 0:
+#+        _fail("settings", "margin_scale", "scale must be positive", "supply the agreed conversion to an annual decimal margin")
+#+    aliases = cfg.get("currency_aliases", {})
+#+    for index, (row, (identity, product)) in enumerate(zip(trades, links)):
+#+        if row["PRODUCT_STATE"] not in TRADE_STATES:
+#+            _fail("trades", "PRODUCT_STATE", "row outside ACTIVE/ISSUING eligibility", "review the executed-product predicate")
+#+        if _day(row["INITIAL_FIXING"], "trades", "INITIAL_FIXING") != day:
+#+            _fail("trades", "INITIAL_FIXING", "query returned an out-of-day trade", "select the product fixing day independently of request creation")
+#+        if identity is None or product is None or product in ambiguous_products:
+#+            key = ("product", product) if product else ("row", index)
+#+            unresolved[key] = {"product_id": product, "id": None,
+#+                               "reason": "Missing RFQ/product identity" if identity is None or product is None else "Product links to several RFQ identities"}
+#+            continue
+#+        if identity in blocked:
+#+            continue
+#+        amount = _decimal(row["AMOUNT"], "trades", "AMOUNT")
+#+        if amount is not None and amount < 0:
+#+            _fail("trades", "AMOUNT", "negative notional needs a separate cancellation rule", "confirm the event and amount basis")
+#+        currency_raw = _text(row["CURRENCY"])
+#+        currency = aliases.get(currency_raw, currency_raw)
+#+        if currency and not re.fullmatch(r"[A-Z]{3}", currency):
+#+            _fail("trades", "CURRENCY", "currency is not a reviewed three-letter code", "confirm a source alias or correct its representation")
+#+        rate = fx.get(currency)
+#+        provider = _text(row.get("PROVIDER")).strip() if options.get("provider_confirmed", False) else ""
+#+        provisional = False
+#+        candidates = sorted(provider_map.get(product, set()))
+#+        if not provider and len(candidates) == 1:
+#+            provider, provisional = candidates[0], not options.get("provider_confirmed", False)
+#+        pnl = _decimal(row.get("PNL_NATIVE"), "trades", "PNL_NATIVE")
+#+        margin = _decimal(row.get("MARGIN_PA"), "trades", "MARGIN_PA")
+#+        lifetime = _decimal(row.get("LIFETIME_YEARS"), "trades", "LIFETIME_YEARS")
+#+        if lifetime is not None and lifetime < 0:
+#+            _fail("trades", "LIFETIME_YEARS", "negative lifetime", "verify fixing/maturity and the approved day convention")
+#+        with localcontext() as context:
+#+            # Supported office inputs are finite decimals. Keep ample precision
+#+            # for notional x rate x lifetime and preserve cents without rounding.
+#+            numbers = [value for value in (amount, pnl, margin, scale, lifetime, rate["rate"] if rate else None) if value is not None]
+#+            context.prec = max(50, sum(len(value.as_tuple().digits) for value in numbers) + 20)
+#+            if pnl is None and all(value is not None for value in (amount, margin, scale, lifetime)):
+#+                pnl = amount * margin * scale * lifetime
+#+            chf = amount * rate["rate"] if amount is not None and rate else None
+#+            pnl_chf = pnl * rate["rate"] if pnl is not None and rate else None
+#+        item = {"id": identity, "trade_id": identity, "product_id": product,
+#+                "flow": _flow(row["FLOW_PROFILE"], options), "flow_provisional": not confirmed,
+#+                "product_type": _text(row["PRODUCT_TYPE"]) or "Unknown",
+#+                "amount": _number_text(amount), "currency": currency, "currency_raw": currency_raw,
+#+                "underlyings": _text(row["UNDERLYINGS"]), "provider": provider,
+#+                "provider_provisional": provisional, "provider_candidates": candidates,
+#+                "platform": _text(row["PLATFORM"]), "initial_fixing": day.isoformat(),
+#+                "chf": _number_text(chf),
+#+                "pnl": _number_text(pnl),
+#+                "pnl_chf": _number_text(pnl_chf),
+#+                "fx_month": rate["month"] if rate else None,
+#+                "fx_rate": _number_text(rate["rate"]) if rate else None,
+#+                "fx_source": rate["source"] if rate else None}
+#+        if identity in result:
+#+            existing = result[identity]
+#+            if {key: value for key, value in existing.items() if key != "flow"} != {key: value for key, value in item.items() if key != "flow"}:
+#+                unresolved[("rfq", identity)] = {"product_id": None, "id": identity,
+#+                    "reason": "Conflicting product/revision/amount observations for one RFQ"}
+#+                blocked.add(identity)
+#+                result.pop(identity)
+#+                continue
+#+            if existing["flow"] != item["flow"]:
+#+                existing["flow"] = "unknown"
+#+            duplicate_trades += 1
+#+        else:
+#+            result[identity] = item
+#+    items = list(result.values())
+#+    missing = {
+#+        "amount": sum(item["amount"] is None for item in items),
+#+        "currency": sum(not item["currency"] for item in items),
+#+        "fx": sum(item["fx_rate"] is None for item in items),
+#+        "pnl": sum(item["pnl"] is None for item in items),
+#+        "underlyings": sum(not item["underlyings"] for item in items),
+#+        "provider": sum(not item["provider"] for item in items),
+#+        "ambiguous_provider": sum(len(item["provider_candidates"]) > 1 and not item["provider"] for item in items),
+#+    }
+#+    for field, count in missing.items():
+#+        if count:
+#+            warnings.append(f"{count} eligible trade(s) have unavailable {field} evidence; their rows are retained.")
+#+    if any(item["provider_provisional"] for item in items):
+#+        warnings.append("Selected option-hedge provider evidence is provisional pending office execution validation.")
+#+    if unresolved:
+#+        warnings.append(f"{len(unresolved)} issuance linkage group(s) remain unresolved. Trade counts and totals are incomplete; request counts are retained. Reconcile RFQ/product links before using trade totals.")
+#+    if float_inputs:
+#+        warnings.append("Floating-storage financial inputs were converted from their returned decimal representation; original source precision cannot be recovered.")
+#+    if counts["unknown"] or any(item["flow"] == "unknown" for item in items):
+#+        warnings.append("Unknown-flow requests and trades remain visible in reconciliation.")
+#+    return {"day": day.isoformat(), "requests": counts, "trades": items,
+#+            "warnings": list(dict.fromkeys(warnings)), "unresolved_trades": list(unresolved.values()),
+#+            "coverage": {"request_ids": len(parents),
+#+            "request_rows": len(requests), "duplicate_request_rows": len(requests) - len(parents),
+#+            "trade_rows": len(trades), "traded_rfqs": len(items),
+#+            "duplicate_trade_rows": duplicate_trades, "trades_complete": not unresolved,
+#+            "unresolved_trade_groups": len(unresolved), "floating_numeric_inputs": float_inputs, "missing": missing,
+#+            "request_basis": "Distinct SLD request ID on Zurich creation day",
+#+            "trade_basis": "Product initial-fixing day; ACTIVE/ISSUING; one executed RFQ",
+#+            "profile_confirmed": confirmed, "source_completeness": "Selected query scope; unpriced-request capture unverified"}}
+#+
+#+
+#+def read_day(cfg, day):
+#+    """Read one bounded SLD day; raise safe errors so callers retain last good data."""
+#+    day = _report_date(day)
+#+    options = _options(cfg)
+#+    limit = options.get("max_rows", 100000)
+#+    if type(limit) is not int or limit < 1:
+#+        _fail("settings", "max_rows", "expected a positive integer", "set an approved bounded daily row limit")
+#+    start = datetime.combine(day, datetime.min.time())
+#+    end = datetime.combine(day + timedelta(days=1), datetime.min.time())
+#+    request_sql, trade_sql = default_queries(cfg)
+#+    fx_error = None
+#+    try:
+#+        fx = _fx(cfg, day)
+#+    except PipelineError as error:
+#+        fx = {"CHF": {"rate": Decimal(1), "month": None, "source": "CHF identity"}}
+#+        fx_error = str(error)
+#+    provider_error = None
+#+    with _dedicated_connection(_factory(cfg)) as connection:
+#+        requests = _fetch(connection, request_sql, {"day_start": start, "day_end": end}, REQUEST_COLUMNS, "requests", limit)
+#+        trades = _fetch(connection, trade_sql, {"day_start": start, "day_end": end}, TRADE_COLUMNS, "trades", limit)
+#+        try:
+#+            providers = _provider_rows(connection, cfg, trades, limit)

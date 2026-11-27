@@ -1,0 +1,444 @@
+#=        options = {'mm_metric': 'count', 'mm_dimension': 'currency'}
+#=        baseline = self.render(options=options)
+#=        selection = {'dimension': 'currency', 'category': 'JPY'}
+#=        state = view.transition({}, 'breakdown', selection, self.index)
+#=        filtered = self.render(state, options=options)
+#=        self.assertEqual([item['rfq'] for item in filtered['mm-case-table.data']], ['currency'])
+#=        self.assertEqual(list(filtered['mm-history.figure'].data[0].y), [0, 1])
+#=        self.assertEqual(sum(filtered['mm-timeline.figure'].data[0].y), 1)
+#=        self.assertEqual(to_json(filtered['mm-kpis.children'][0]), to_json(baseline['mm-kpis.children'][0]))
+#=        kpi = metric_cards(filtered['mm-kpis.children'])['selected_missed_rfqs']['children']
+#=        self.assertEqual(kpi[1]['props']['children'], '1')
+#=        self.assertEqual(kpi[2]['props']['children'], 'Prev 0')
+#=        self.assertEqual(kpi[3]['props']['children'][1]['props']['children'], '1')
+#=        self.assertIn('JPY', to_json(filtered['mm-history-title.children']))
+#=        self.assertIn('JPY', to_json(filtered['mm-print-context.children']))
+#=        self.assertFalse(pattern_ids(json.loads(to_json(filtered['mm-print-context.children']))))
+#=
+#=        before = baseline['mm-breakdown.figure'].data[0]
+#=        after = filtered['mm-breakdown.figure'].data[0]
+#=        self.assertEqual((after.y, after.x), (before.y, before.x))
+#=        self.assertEqual(after.marker.color[list(after.y).index('JPY')], '#298CFF')
+#=
+#=        def totals(figure):
+#=            if not figure.data:
+#=                return {}
+#=            columns = zip(*(trace.x for trace in figure.data))
+#=            return {label: sum(value or 0 for value in column)
+#=                    for label, column in zip(figure.data[0].y, columns)}
+#=
+#=        for chart in ('mm-reasons.figure', 'mm-details.figure'):
+#=            self.assertEqual(totals(filtered[chart]), totals(baseline[chart]))
+#=
+#=        other_currency = view.transition(state, 'breakdown', {**selection, 'category': 'CHF'}, self.index)
+#=        switched = self.render(other_currency, options=options)
+#=        self.assertEqual(list(switched['mm-history.figure'].data[0].y), [1, 3])
+#=        kpi = metric_cards(switched['mm-kpis.children'])['selected_missed_rfqs']['children']
+#=        self.assertEqual(kpi[2]['props']['children'], 'Prev 1')
+#=        self.assertEqual(kpi[3]['props']['children'][1]['props']['children'], '4')
+#=
+#=        changed_dimension = self.render(state, options={**options, 'mm_dimension': 'region'})
+#=        self.assertEqual(list(changed_dimension['mm-history.figure'].data[0].y), [1, 4])
+#=
+#=    def test_detail_menu_action_does_not_change_focused_reason_context(self):
+#=        state = view.transition({}, 'reason', 'configuration', self.index)
+#=        before = self.render(state)
+#=        token = next(token for token, item in self.index['details'].items()
+#=                     if item['reason'] == 'validation:INVALID_PREMIUM')
+#=        state = view.transition(state, 'filter', {'kind': 'detail', 'mode': 'include',
+#=                                'reason': 'validation:INVALID_PREMIUM', 'detail': token}, self.index)
+#=        after = self.render(state)
+#=        self.assertEqual(state['reason'], 'configuration')
+#=        self.assertEqual(list(before['mm-details.figure'].data[0].x), list(after['mm-details.figure'].data[0].x))
+#=        self.assertEqual([sum(values) for values in zip(*(trace.x for trace in before['mm-reasons.figure'].data))],
+#=                         [sum(values) for values in zip(*(trace.x for trace in after['mm-reasons.figure'].data))])
+#=
+#=    def test_parent_exclusion_clears_children_disables_actions_and_guards_server_transition(self):
+#=        token = engine.detail_id('configuration', engine.CONFIG_DETAILS['absent'])
+#=        state = view.transition({}, 'filter', {'kind': 'detail', 'mode': 'include',
+#=                                'reason': 'configuration', 'detail': token}, self.index)
+#=        state = view.transition(state, 'filter', {'kind': 'reason', 'mode': 'exclude',
+#=                                'reason': 'configuration', 'detail': ''}, self.index)
+#=        self.assertEqual(state['query']['include_details'], [])
+#=        menu = json.loads(to_json(self.render(state)['mm-reason-menu.children']))
+#=        def buttons(node):
+#=            result = []
+#=            if isinstance(node, dict):
+#=                props = node.get('props', {})
+#=                identifier = props.get('id')
+#=                if isinstance(identifier, dict) and identifier.get('kind') == 'detail' and identifier.get('reason') == 'configuration':
+#=                    result.append(props)
+#=                for item in node.values(): result.extend(buttons(item))
+#=            elif isinstance(node, list):
+#=                for item in node: result.extend(buttons(item))
+#=            return result
+#=        self.assertTrue(buttons(menu))
+#=        self.assertTrue(all(item['disabled'] for item in buttons(menu)))
+#=        self.assertIn('Excluded with Reason', to_json(menu))
+#=        self.assertEqual(view.transition(state, 'detail', token, self.index), state)
+#=        self.assertEqual(view.transition(state, 'filter', {'kind': 'detail', 'mode': 'include',
+#=                         'reason': 'configuration', 'detail': token}, self.index), state)
+#=
+#=    def test_lifetime_reason_explicitly_identifies_configuration_assessment_gap(self):
+#=        self.snapshot['source_coverage']['admin']['complete'] = False
+#=        self.index = engine.build_index(self.snapshot)
+#=        key = engine.key(self.snapshot['rows'][0])
+#=        assessment = self.index['entries'][key]['reasons'][engine.LIFETIME]
+#=        self.assertTrue(assessment['status'])
+#=        self.assertTrue(assessment['configuration_assessment_incomplete'])
+#=        detail = json.dumps(json.loads(to_json(view.case_detail(self.index, key))), ensure_ascii=False)
+#=        self.assertIn('configuration assessment incomplete', detail)
+#=        self.assertIn('a configuration-based exclusion has not been established', detail)
+#=
+#=    def test_original_omitted_and_configuration_excluded_codes_remain_inspectable(self):
+#=        row = self.snapshot['rows'][0]
+#=        row['observations'].append({'source': 'validation', 'code': 'ADMIN_UNDERLYING_NOT_FOUND',
+#=                                    'message': 'Original omitted-code evidence'})
+#=        self.index = engine.build_index(self.snapshot)
+#=        detail = json.dumps(json.loads(to_json(view.case_detail(self.index, engine.key(row)))), ensure_ascii=False)
+#=        self.assertIn('Original recorded source observations', detail)
+#=        self.assertIn('ADMIN_UNDERLYING_NOT_FOUND', detail)
+#=        self.assertIn('EXPECTED_LIFETIME_CALCULATION_FAILED', detail)
+#=        self.assertIn('Original omitted-code evidence', detail)
+#=        self.assertNotIn('validation:ADMIN_UNDERLYING_NOT_FOUND', self.index['reasons'])
+#=
+#=    def test_missing_and_invalid_provider_flags_have_different_visible_meanings(self):
+#=        item = self.snapshot['rows'][1]['admin_support'][0]
+#=        item.update(PROVIDER_A=None, PROVIDER_B=None, missing_provider_flags=['PROVIDER_A'], invalid_provider_flags=['PROVIDER_B'])
+#=        self.index = engine.build_index(self.snapshot)
+#=        detail = json.dumps(json.loads(to_json(view.case_detail(self.index,
+#=            engine.key(self.snapshot['rows'][1])))), ensure_ascii=False)
+#=        self.assertIn('Provider A: disabled (missing configuration)', detail)
+#=        self.assertIn('Provider B: unknown (invalid flag)', detail)
+#=        self.assertIn('15.09.2026 12:00', detail)
+#=
+#=
+#=class MissedCallbackTests(unittest.TestCase):
+#=    def setUp(self):
+#=        self.snapshot, self.index = fixture()
+#=        self.app = Dash(__name__)
+#=        controls = [dcc.Dropdown(id='platform', value='PLATFORM_A'),
+#=                    dcc.Dropdown(id='month', value='2026-09'),
+#=                    dcc.Dropdown(id='population', value='all'),
+#=                    html.Button('Reset', id='reset', n_clicks=0)]
+#=        controls += [dcc.Dropdown(id='filter-' + name, value=[]) for name in view.BUSINESS_FILTERS]
+#=        self.app.layout = html.Div(controls + view.layouts(self.snapshot, {}))
+#=        view.register_callbacks(self.app, self.snapshot, {}, self.index)
+#=
+# COPY BLOCK 14
+#=    def invoke(self, trigger, values=None, state=None, pattern=None):
+#=        callback_key, metadata = next(iter(self.app.callback_map.items()))
+#=        defaults = {('platform', 'value'): 'PLATFORM_A', ('month', 'value'): '2026-09',
+#=                    ('population', 'value'): 'all', ('missed-state', 'data'): state or {},
+#=                    ('mm-case-table', 'data'): []}
+#=        defaults.update({('filter-' + name, 'value'): [] for name in view.BUSINESS_FILTERS})
+#=        defaults.update(values or {})
+#=        inputs = []
+#=        for item in metadata['inputs']:
+#=            if item['id'].startswith('{') and pattern is not None and pattern['type'] in item['id']:
+#=                inputs.append([{'id': pattern, 'property': item['property'], 'value': 1}])
+#=            else:
+#=                inputs.append({**item, 'value': defaults.get((item['id'], item['property']),
+#=                              [] if item['id'].startswith('{') else None)})
+#=        states = [{**item, 'value': defaults.get((item['id'], item['property']))} for item in metadata['state']]
+#=        response = self.app.server.test_client().post('/_dash-update-component', json={
+#=            'output': callback_key,
+#=            'outputs': [{'id': item.component_id, 'property': item.component_property} for item in metadata['output']],
+#=            'inputs': inputs, 'state': states, 'changedPropIds': trigger if isinstance(trigger, list) else [trigger]})
+#=        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+#=        return response.get_json()['response']
+#=
+#=    def test_remove_breakdown_chip_with_a_unicode_underlying_label(self):
+#=        category = 'Whole basket · no common provider'
+#=        action = {'type': 'mm-remove', 'group': 'breakdown', 'token': category}
+#=        state = {'breakdown': {'dimension': 'underlying', 'category': category}}
+#=        trigger = json.dumps(action, sort_keys=True, separators=(',', ':'), ensure_ascii=False) + '.n_clicks'
+#=        removed = self.invoke(trigger, {('mm-dimension', 'value'): 'underlying'}, state, pattern=action)
+#=        self.assertNotIn('breakdown', removed['missed-state']['data'])
+#=
+#=    def test_chart_click_callback_returns_correct_shape_and_filter(self):
+#=        result = self.invoke('mm-reasons.clickData', {
+#=            ('mm-reasons', 'clickData'): {'points': [{'customdata': ['configuration']}]}})
+#=        self.assertEqual(result['missed-state']['data']['query']['include_reasons'], ['configuration'])
+#=        self.assertEqual(result['mm-case-table']['page_current'], 0)
+#=        self.assertIsNone(result['mm-reasons']['clickData'])
+#=
+#=    def test_breakdown_callback_can_repeat_remove_and_reset_the_exact_category(self):
+#=        figure = view.render(view.PAGE, self.snapshot, 'PLATFORM_A', '2026-09', 'all',
+#=                             {}, {}, {'mm_metric': 'count', 'mm_dimension': 'currency'},
+#=                             index=self.index)['mm-breakdown.figure']
+#=        data = next(point for point in figure.data[0].customdata if point[0] == 'JPY')
+#=        self.assertEqual(data[4], 'currency')
+#=        click = {('mm-dimension', 'value'): 'currency',
+#=                 ('mm-breakdown', 'clickData'): {'points': [{'customdata': list(data)}]}}
+#=        before = {'query': {'exclude_reasons': ['configuration']},
+#=                  'rfq_key': engine.key(self.snapshot['rows'][1]), 'case_page': 3,
+#=                  'timeline_day': '2026-09-15', 'timeline_scope': 'old-scope'}
+#=        result = self.invoke('mm-breakdown.clickData', click, before)
+#=        state = result['missed-state']['data']
+#=        self.assertEqual(state['breakdown'], {'dimension': 'currency', 'category': 'JPY'})
+#=        self.assertIsNone(result['mm-breakdown']['clickData'])
+#=        self.assertEqual(result['mm-case-table']['page_current'], 0)
+#=        self.assertNotIn('rfq_key', state)
+#=        self.assertNotIn('timeline_day', state)
+#=        self.assertNotIn('timeline_scope', state)
+#=        self.assertEqual(view._query(state, self.index)['exclude_reasons'], ['configuration'])
+#=
+#=        repeat = self.invoke('mm-breakdown.clickData', click, state)
+#=        self.assertNotIn('breakdown', repeat['missed-state']['data'])
+#=        action = {'type': 'mm-remove', 'group': 'breakdown', 'token': 'JPY'}
+#=        self.assertIn(action, pattern_ids(json.loads(to_json(view.active_filters(self.index, state)))))
+#=        remove = self.invoke(json.dumps(action, sort_keys=True, separators=(',', ':')) + '.n_clicks',
+#=                             {('mm-dimension', 'value'): 'currency'}, state, pattern=action)
+#=        self.assertNotIn('breakdown', remove['missed-state']['data'])
+#=        changed = self.invoke('mm-dimension.value', {('mm-dimension', 'value'): 'region'}, state)
+#=        self.assertNotIn('breakdown', changed['missed-state']['data'])
+#=        self.assertEqual(view._query(changed['missed-state']['data'], self.index)['exclude_reasons'],
+#=                         ['configuration'])
+#=        cleared = self.invoke('analysis-missed-clear.n_clicks', {('analysis-missed-clear', 'n_clicks'): 1}, state)
+#=        self.assertNotIn('breakdown', cleared['missed-state']['data'])
+#=        reset = self.invoke('reset.n_clicks', {('reset', 'n_clicks'): 1}, state)
+#=        self.assertNotIn('breakdown', reset['missed-state']['data'])
+#=
+#=    def test_reset_clears_query_search_and_paging_but_preserves_chart_preferences(self):
+#=        result = self.invoke('reset.n_clicks', {('reset', 'n_clicks'): 1,
+#=                             ('mm-case-search', 'value'): 'old search'},
+#=                             {'query': {'exclude_reasons': ['configuration']}, 'rfq_key': 'old selection'})
+#=        self.assertEqual(result['missed-state']['data'], {'_reset': 1, '_analysis_reset': 0})
+#=        self.assertEqual(result['mm-case-search']['value'], '')
+#=        self.assertEqual(result['mm-case-table']['page_current'], 0)
+#=        self.assertNotIn('mm-dimension', result)
+#=        self.assertNotIn('mm-metric', result)
+#=        self.assertNotIn('platform', result)
+#=
+#=    def test_shared_reset_takes_priority_when_attribute_change_is_first_trigger(self):
+#=        result = self.invoke(['filter-currency.value', 'reset.n_clicks'],
+#=            {('reset', 'n_clicks'): 1, ('filter-currency', 'value'): []},
+#=            {'query': {'include_reasons': ['currency']}, 'reason': 'currency'})
+#=        self.assertEqual(result['missed-state']['data'], {'_reset': 1, '_analysis_reset': 0})
+#=        self.assertNotIn('mm-dimension', result)
+#=        self.assertNotIn('mm-metric', result)
+#=
+#=    def test_selected_rfq_callback_uses_stable_id_and_retains_query(self):
+#=        key = engine.key(self.snapshot['rows'][1])
+#=        state = {'query': {'include_reasons': ['validation:FAILED_TO_HEDGE']}}
+#=        result = self.invoke('mm-case-table.active_cell', {
+#=            ('mm-case-table', 'active_cell'): {'row': 0, 'column': 0, 'row_id': key},
+#=            ('mm-case-table', 'data'): [{'id': key, 'rfq': 'hedge'}]}, state)
+#=        self.assertEqual(result['missed-state']['data']['rfq_key'], key)
+#=        self.assertEqual(result['missed-state']['data']['query'], state['query'])
+#=
+#=    def test_hierarchical_menu_button_callback_keeps_reason_detail_relationship(self):
+#=        token = next(token for token, item in self.index['details'].items()
+#=                     if item['reason'] == 'validation:INVALID_PREMIUM')
+#=        action = {'type': 'mm-filter', 'kind': 'detail', 'reason': 'validation:INVALID_PREMIUM',
+#=                  'detail': token, 'mode': 'exclude'}
+#=        result = self.invoke(json.dumps(action, sort_keys=True, separators=(',', ':')) + '.n_clicks',
+#=                             pattern=action)
+#=        self.assertEqual(result['missed-state']['data']['query']['exclude_details'], [token])
+#=
+#=    def test_remove_chip_callback_removes_just_its_exact_scoped_token(self):
+#=        action = {'type': 'mm-remove', 'group': 'include_reasons', 'token': 'configuration'}
+#=        state = {'query': {'include_reasons': ['configuration', 'currency']}}
+#=        result = self.invoke(json.dumps(action, sort_keys=True, separators=(',', ':')) + '.n_clicks',
+#=                             state=state, pattern=action)
+#=        self.assertEqual(result['missed-state']['data']['query']['include_reasons'], ['currency'])
+#=
+#=
+#=if __name__ == '__main__':
+#=    unittest.main()
+# FILE {"kind": "app", "name": "coupon_lab/daily.py", "new_lf": true}
+#+"""Daily Reporting for the local desktop app and the daily-capture command.
+#+
+#+Read SLD only for Today or an explicit capture. The SQLite store is opened on
+#+first use so a shared-folder problem cannot prevent opening the monthly report.
+#+All dates shown to the desk follow the Zurich calendar.
+#+"""
+#+from __future__ import annotations
+#+
+#+from datetime import date, datetime, timedelta
+#+from pathlib import Path
+#+from threading import Lock
+#+from uuid import uuid4
+#+from zoneinfo import ZoneInfo
+#+
+#+from .daily_source import demo_day, read_day
+#+from .daily_store import DailyStore
+#+
+#+
+#+class DailyError(ValueError):
+#+    safe_message = True
+#+
+#+
+#+def _date(value):
+#+    try:
+#+        result = date.fromisoformat(value)
+#+        if value == result.isoformat():
+#+            return result
+#+    except (ValueError, TypeError):
+#+        pass
+#+    raise DailyError("Daily Reporting needs a date in YYYY-MM-DD format.")
+#+
+#+
+#+class DailyService:
+#+    def __init__(self, cfg, demo=False):
+#+        self.cfg = cfg
+#+        self.demo = demo
+#+        self.options = cfg.get("daily_reporting", {})
+#+        self.lock = Lock()
+#+        self._store = None
+#+        self._last_live = None
+#+
+#+    @property
+#+    def store(self):
+#+        with self.lock:
+#+            if self._store is None:
+#+                directory = Path(self.cfg["_root"])
+#+                filename = ("../coupon_lab_reporting/daily_demo.sqlite3" if self.demo else
+#+                            self.options.get("store", "../coupon_lab_reporting/daily.sqlite3"))
+#+                if not isinstance(filename, str) or not filename.strip():
+#+                    raise DailyError("Set daily_reporting.store to the shared reporting SQLite file.")
+#+                self._store = DailyStore((directory / filename).resolve())
+#+            return self._store
+#+
+#+    def today(self):
+#+        return datetime.now(ZoneInfo("Europe/Zurich")).date()
+#+
+#+    def previous_day(self):
+#+        holidays = self.options.get("holidays", [])
+#+        if not isinstance(holidays, list):
+#+            raise DailyError("Set daily_reporting.holidays to a list of Zurich dates in YYYY-MM-DD format.")
+#+        closed = {_date(item) for item in holidays}
+#+        day = self.today() - timedelta(days=1)
+#+        while day.weekday() >= 5 or day in closed:
+#+            day -= timedelta(days=1)
+#+        return day
+#+
+#+    def days(self):
+#+        return sorted({self.today().isoformat(), self.previous_day().isoformat(), *self.store.days()}, reverse=True)
+#+
+#+    def _day(self, value):
+#+        day = _date(value)
+#+        if day > self.today():
+#+            raise DailyError("Choose today or a past Zurich reporting day.")
+#+        return day
+#+
+#+    def _read(self, day):
+#+        return demo_day(day) if self.demo else read_day(self.cfg, day)
+#+
+#+    def load(self, day):
+#+        selected = self._day(day)
+#+        if selected != self.today():
+#+            return self.store.load(day)
+#+        # Only fresh reads replace the last-good source. Always combine it with
+#+        # the latest shared manual revisions, including after a source failure.
+#+        store = self.store
+#+        with self.lock:
+#+            try:
+#+                source = self._read(selected)
+#+            except Exception as exc:
+#+                source = self._last_live
+#+                if source and source.get("day") != day:
+#+                    source = None
+#+                from .errors import PipelineError
+#+                detail = str(exc) if isinstance(exc, PipelineError) or getattr(exc, "safe_message", False) else "Check the office reader and configured daily source."
+#+                failure = "SLD refresh failed. " + detail
+#+            else:
+#+                self._last_live = source
+#+                failure = None
+#+        view = store.load(day, source=source)
+#+        if failure:
+#+            view["warnings"] = [failure, *view.get("warnings", [])]
+#+            view["refresh_error"] = failure
+#+        return view
+#+
+#+    def capture(self, day):
+#+        selected = self._day(day)
+#+        store = self.store
+#+        if store.snapshot(day) is None:
+#+            source = self._read(selected)
+#+            store.capture(source, str(uuid4()))
+#+        return store.load(day)
+#+
+#+    def preview(self, day):
+#+        """Reconcile a day's current SLD observations before saving its first snapshot."""
+#+        return self.store.load(day, source=self._read(self._day(day)))
+#+
+#+    def _require_voice_trade(self, day, trade_id):
+#+        # Validate the browser selection against server-side evidence.
+#+        if day == self.today().isoformat():
+#+            with self.lock:
+#+                source = self._last_live
+#+            if not source or source.get("day") != day:
+#+                source = self._read(_date(day))
+#+        else:
+#+            source = self.store.snapshot(day)
+#+        if not source or not any(t["id"] == trade_id and t["flow"] == "voiceflow" for t in source["trades"]):
+#+            raise DailyError("The selected SLD voice trade is unavailable for this day. Refresh and select it again.")
+#+
+#+    def add(self, day, values, token):
+#+        self._day(day)
+#+        if values.get("trade_id"):
+#+            self._require_voice_trade(day, values["trade_id"])
+#+        return self.store.add(day, values, token)
+#+
+#+    def link(self, day, entry_id, rev, trade_id, token, *, confirmed_missing=False):
+#+        self._day(day)
+#+        if trade_id:
+#+            self._require_voice_trade(day, trade_id)
+#+        return self.store.link(entry_id, rev, trade_id, token, confirmed_missing=confirmed_missing, day=day)
+#+
+#+    def remove(self, day, entry_id, rev, token):
+#+        self._day(day)
+#+        return self.store.remove(entry_id, rev, token, day=day)
+# FILE {"kind": "app", "name": "coupon_lab/daily_source.py", "new_lf": true}
+#+"""Read and calculate one Daily Reporting day from read-only SLD.
+#+
+#+Inputs are the existing full settings dict and a report date. Paths resolve
+#+against settings['_root']. The existing sld.connection_module supplies the
+#+dedicated connection. No bank driver is selected or imported here.
+#+
+#+Requests use request creation in [Zurich midnight, next Zurich midnight).
+#+Trades use product INITIAL_FIXING in that window and ACTIVE/ISSUING state.
+#+One request ID is one RFQ. Child offers never multiply its notional.
+#+
+#+Office choices live in daily_reporting.source. Optional request_sql/trade_sql
+#+or request_sql_file/trade_sql_file replace the corresponding SELECT and receive day_start/day_end DB-API binds
+#+(naive Zurich datetimes). flow_profile_expression defaults to the observed
+#+p.USER_PROFILE_NAME candidate. Set profile_confirmed=true after comparing it
+#+with the Excel Manual profile. Before that, category figures are provisional.
+#+Missing/unrecognized profile markers and conflicting observations stay unknown.
+#+underlyings_expression defaults to the observed r.UNDERLYINGS text field.
+#+
+#+Request SELECT aliases: RFQ_ID, REQUEST_CREATED_AT, FLOW_PROFILE.
+#+Trade SELECT aliases: RFQ_ID, PRODUCT_ID, PRODUCT_STATE, INITIAL_FIXING,
+#+FLOW_PROFILE, PRODUCT_TYPE, AMOUNT, CURRENCY, UNDERLYINGS, PLATFORM.
+#+Optional trade aliases: PROVIDER (office-confirmed executed provider),
+#+PNL_NATIVE (office-confirmed native-currency issuance PnL), or MARGIN_PA and
+#+LIFETIME_YEARS. The latter calculation requires explicit positive margin_scale
+#+in daily_reporting.source, e.g. '0.01' for a confirmed percentage representation.
+#+The office SELECT supplies lifetime in years under its agreed convention.
+#+Default SQL supplies NULL PnL, margin and lifetime, with no financial guesses.
+#+
+#+Default provider evidence is distinct COUNTERPARTY on selected TRS/DIP/PUT
+#+hedge rows. It remains labelled provisional. Conflicting counterparties remain
+#+unknown. An office PROVIDER alias is usable only with provider_confirmed=true.
+#+
+#+FX uses each currency's latest available reviewed monthly CHF_per_unit factor
+#+on or before the reporting month. Each used month/factor is retained. Empty
+# COPY BLOCK 15
+#+rate cells remain unavailable. Missing amount/rate/PnL preserves the trade row.
+#+An unusable FX reference preserves CHF identity and leaves foreign conversion
+#+unavailable. Failed optional hedge enrichment preserves both cohort reads and
+#+their amounts, with unavailable provider evidence. A failed request or trade
+#+cohort read is fatal and must leave the caller's last-good source unchanged.
+#+Outputs contain JSON-safe strings for Decimal values, integer request counts,
+#+explicit coverage/warnings, and one row per eligible traded RFQ.
+#+"""
+#+from __future__ import annotations
+#+
+#+import csv
+#+from datetime import date, datetime, timedelta, timezone
+#+from decimal import Decimal, InvalidOperation, localcontext
+#+import importlib.util
+#+from pathlib import Path

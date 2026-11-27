@@ -1,0 +1,510 @@
+#+Friday 27 November 2026 | Europe/Zurich
+#+
+#+GOAL AND WORKING ORDER
+#+
+#+Run the Daily Reporting pilot in a copy of the working office app, reconcile
+#+its source and figures, exercise shared additions from two actual PCs, and
+#+retain a usable result or a precise failure for the weekend. Use the existing
+#+approved internal GPT-5.1 one task at a time. Keep one internal WORKLOG and use
+#+WEEKEND_RETURN.txt for the findings you choose to handwrite and bring back.
+#+
+#+The first version uses SLD for all automatic data. SQLite holds the team's
+#+manual entries and saved daily source captures. The older voice pricing
+#+database supplies no automatic input to this pilot. Its database and writer
+#+remain under their existing owner.
+#+
+#+The daily report has eFlow and voiceflow figures, trade lists, subscription
+#+wins/issuances and separate pre-hedges. It generates no morning-call narrative.
+#+Everyone with access to the shared app may run it and edit reporting entries.
+#+There is no new app-user allowlist or requirement to record editor identity.
+#+
+#+Work through these outcomes. Record a missing fact at its affected step, then
+#+continue independent tests or an already supported report section.
+#+
+#+  1. Preserve the working copy and identify each PC's actual interpreter.
+#+  2. Save one pasted installer, extract its guide, check and apply the update.
+#+  3. Select a separate reporting database and prove initialization/copy safety.
+#+  4. Run focused tests and open the latest prepared monthly run.
+#+  5. Reconcile a non-saving daily source preview with the desk reference.
+#+  6. Test the shared folder with the dedicated fictional two-PC probe.
+#+  7. Exercise manual events and refresh in an isolated reporting test store.
+#+  8. Verify a consistent backup and isolated restore.
+#+  9. Select the live pilot store and save the first accepted source capture.
+#+ 10. Check the two mapping rows and Reason exclusions, then record acceptance.
+#+
+#+Keep business records, SQL, private configuration, credentials and actual
+#+results inside the office environment. Choose which notes to bring back.
+#+The diagnostic runner prints aggregate checks. The app's --preview command
+#+also prints internal financial figures, so retain its output internally.
+#+
+#+If time is short, prioritize Thursday's figures, Friday live, one shared edit,
+#+then Save day snapshot and reopen; record every untested operation as pending.
+#+
+# COPY BLOCK 24
+#+1. PREPARE THE COPY AND TERMINAL
+#+
+#+Open the working app by its usual method first. Record its launcher, prepared
+#+run, source revision or file inventory, and any uncommitted office edits in
+#+WORKLOG. Confirm one familiar monthly page/filter works. Preserve that app and
+#+its matching run. The reported baseline includes intentionally disabled input/
+#+code freshness checks; this pilot must preserve that office choice.
+#+
+#+Copy the working application through the normal internal method to an unused
+#+pilot folder. An example shared-folder layout is:
+#+
+#+  Shared RFQ\
+#+    Coupon Lab Working\             preserved office app
+#+    Coupon Lab Pilot\               copy to update
+#+    Daily Reporting Friday Kit\     pasted installer and extracted guide
+#+    coupon_lab_reporting\           separate shared reporting files
+#+
+#+These names are examples. The relative commands below assume the kit and
+#+Coupon Lab Pilot are sibling folders. Substitute the actual pilot path if your
+#+layout differs. The installer --app always selects the copy to modify.
+#+
+#+Use the Miniconda Prompt/environment that runs the app successfully on that PC.
+#+Identify it before choosing packages or drivers:
+#+
+#+  python --version
+#+  python -c "import sys; print(sys.executable)"
+#+
+#+The reported working PC used Python 3.14.8 and Dash 4.4.1. Record actual versions
+#+on A and B. Miniconda being installed alone does not establish the app packages
+#+or approved SLD client. Use the existing approved environment and connection
+#+hook. Nothing in this kit installs packages or creates a bank connection.
+#+
+#+To enter the kit folder from CMD/Miniconda Prompt, including a UNC share:
+#+
+#+  pushd "ACTUAL_FULL_PATH_TO_Daily Reporting Friday Kit"
+#+
+#+Use popd when finished. PowerShell supports a shared path with:
+#+
+#+  Set-Location -LiteralPath "ACTUAL_FULL_PATH_TO_Daily Reporting Friday Kit"
+#+
+#+If a colleague's double-click launcher selects the wrong Python, configure the
+#+existing per-PC override with that PC's verified executable. Examples below
+#+contain a placeholder which must be replaced with an actual approved path.
+#+
+#+CMD, for that terminal session:
+#+  set "COUPON_LAB_PYTHON=C:\ACTUAL_APPROVED_ENV\python.exe"
+#+
+#+PowerShell, for that terminal session:
+#+  $env:COUPON_LAB_PYTHON = 'C:\ACTUAL_APPROVED_ENV\python.exe'
+#+
+#+Then launch the BAT from that same terminal to inherit the setting. For normal
+#+Explorer double-click use the bank's normal per-user environment-variable setup
+#+or the supported configured interpreter route. A shared runtime.python value
+#+must make sense on every PC using it. Keep local user paths out of shared notes.
+#+
+#+RECORD
+#+Working app/run reproduced, pilot-copy alias, actual interpreter/package
+#+versions on A/B, source hook available, and the fallback retained.
+#+
+#+IF IT FAILS
+#+Keep the first safe stage/error and compare interpreter, working directory and
+#+launcher arguments with the successful office launch. Continue file/schema
+#+inspection while resolving that specific launch failure.
+#+
+#+2. PASTE THE SINGLE INSTALLER AND EXTRACT THE COMPANIONS
+#+
+#+Paste the COMPLETE supplied Python text into a new file saved exactly as:
+#+
+#+  COPY_ME_FIRST.py.txt
+#+
+#+Use plain text/UTF-8. The name intentionally ends in .py.txt and Python runs it
+#+directly. Check that the editor did not add another .txt suffix. Save the file
+#+in the kit folder, outside the application and its tracked source.
+#+
+#+From the kit folder, the following commands work in CMD and PowerShell:
+#+
+#+  python COPY_ME_FIRST.py.txt --guide
+#+  python COPY_ME_FIRST.py.txt --app "..\Coupon Lab Pilot" --check
+#+
+#+--guide extracts these companions beside the pasted installer:
+#+  FRIDAY_OFFICE_GUIDE.txt
+#+  WEEKEND_RETURN.txt
+#+  RUN_OFFICE_CHECKS.py.txt
+#+
+#+It protects existing altered files. If extraction encounters an edited guide
+#+or filled return sheet, retain that file and extract into a fresh kit folder
+#+containing the same complete installer. Keep your work separate from the kit
+#+templates. No renaming to .py is needed for the diagnostic runner either.
+#+
+#+--check reports the kit version and N files to update. It checks the target
+#+copy and stages the intended changes without applying app-file replacements.
+#+Existing office settings, hooks, reviewed references and edits must be retained.
+#+If the product-mapping reference is outside the app copy, make an internal copy
+#+of that reviewed CSV inside the pilot and set references.products to that copy
+#+before installation. Preserve its existing rows and private platform spelling.
+#+
+#+Apply only to the selected pilot copy, then repeat the check:
+#+
+#+  python COPY_ME_FIRST.py.txt --app "..\Coupon Lab Pilot" --apply
+#+  python COPY_ME_FIRST.py.txt --app "..\Coupon Lab Pilot" --check
+#+
+#+EXPECT
+#+An apply that changes files prints "Installed. Originals are in the sibling
+#+folder ...". The backup is named coupon_daily_backup_YYYYMMDD_... beside the
+#+app. The repeat check reports 0 files to update. Retain that backup and the
+#+preserved whole working app until the office pilot checks pass.
+#+
+#+IF IT FAILS
+#+An office-edited file may need a local Git three-way merge. A conflict should
+#+stop before installing the planned app changes. Do not replace the configured
+#+office app with generic source to get past it. Export a fresh reference folder:
+#+
+#+  python COPY_ME_FIRST.py.txt --export "merge_reference_friday_r2"
+#+
+#+The destination must be new. Use the exported replacement/patch and the actual
+#+office file with internal GPT-5.1. Preserve the connection hook, startup edits,
+#+private configuration and disabled freshness behavior. Resolve the named file,
+#+rerun --check, then --apply and --check. Record the resolution internally.
+#+
+#+PROMPT FOR INTERNAL GPT-5.1
+#+Help me install this update into our pilot COPY. Inspect the actual check result
+#+and affected files. Preserve office settings, the read-only SLD adapter, private
+#+references and our disabled freshness checks. If there is a merge conflict,
+#+compare the exported reference with the office file and resolve only the needed
+#+change. Give one exact action at a time, its expected result and failure branch.
+#+Record changed files, the retained backup and the repeat-check result.
+#+
+#+3. SELECT A SEPARATE REPORTING STORE
+#+
+#+Open the pilot settings.json internally:
+#+
+#+  notepad "..\Coupon Lab Pilot\settings.json"
+#+
+#+The installed default is the following section within the existing JSON:
+#+
+#+  "daily_reporting": {
+#+    "store": "../coupon_lab_reporting/daily.sqlite3",
+#+    "holidays": []
+#+  }
+#+
+#+Keep the rest of settings.json. Keep any installed daily_reporting.source
+#+configuration too. JSON uses forward slashes above. Native Windows backslashes
+#+inside JSON strings need escaping. Relative store paths resolve beside the app
+#+settings file. Both PCs must reach the same reporting file and be able to create
+#+its rollback journal. Configure the desk's actual holiday dates as YYYY-MM-DD.
+#+
+#+The default is a dedicated app-owned reporting database. It must not point to
+#+the voice pricing SQLite file or the earlier one-table manual prototype. The
+#+current reporting schema has daily_meta version 1 and exactly daily_snapshots,
+#+daily_entries, daily_revisions and daily_retries alongside that marker table.
+#+
+#+For the first UI exercises use a separate normal reporting TEST file, e.g.:
+#+
+#+  "store": "../coupon_lab_reporting/daily_friday_test.sqlite3"
+#+
+#+All PC A/B app instances must be stopped when you change their common store
+#+configuration. Keep fictional manual exercises in this test file. After the
+#+tests, point the pilot to its fresh live reporting file and initialize that
+#+file before using real manual additions.
+#+
+#+From the kit folder:
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" store-init
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" store-check
+#+
+#+EXPECT
+#+COMPLETED, schema marker daily_meta:1, integrity_ok true, rollback journal mode
+#+and counters. A new store has no business entries or saved source captures.
+#+Store initialization creates the configured dedicated database and tables.
+#+Existing foreign/pricing/prototype schemas are rejected before store writes.
+#+An existing valid reporting file is checked rather than reset.
+#+
+#+IF IT FAILS
+#+Record the stage/code. Check the selected path, parent-folder and journal-file
+#+permissions, existing schema and supported shared-filesystem locking. No WAL is
+#+enabled by this app. Do not delete journal/sidecar files or change journal mode
+#+to force a failed check through. A reachable file and a supported concurrent
+#+write arrangement need separate evidence from the actual PCs.
+#+
+#+OPTIONAL: COPY AN ACTUAL PRIOR REPORTING DATABASE SAFELY
+#+
+#+Use this only for a prior database with the current reporting schema, containing
+#+entries/captures you intend to preserve. It is optional. The voice pricing DB
+#+and the older prototype require their own deliberate conversion and are not
+#+accepted by this copy operation.
+#+
+#+Stop all app instances, capture commands and other writers using that reporting
+#+file. Keep the original. Choose a NEW destination, different from the source
+#+and from any initialized test/live file. Replace the two absolute placeholders:
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" store-copy --source "ABSOLUTE_PRIOR_REPORTING_DB" --destination "ABSOLUTE_NEW_REPORTING_DB"
+#+
+#+This uses SQLite backup from a read-only source, checks the exact schema,
+#+quick_check and aggregate counts, and refuses an existing destination. Expect
+#+counts_reconciled and integrity_ok true. It does not change settings.json.
+#+Only after success, point daily_reporting.store at that new copy and run
+#+store-check. The original remains available. If the chosen target exists, keep
+#+it and choose another unused name; do not delete it to make the copy run.
+#+
+#+The dedicated shared probe described below contains an extra marker table.
+#+It is a TEST artifact and is intentionally not accepted as a normal prior
+#+reporting database by store-copy. Use the normal UI test store for restore work.
+#+
+#+OPTIONAL NEGATIVE COPY TEST WITH FOREIGN TABLES
+#+
+#+In PowerShell in the kit folder, use fresh filenames. This creates only a local
+#+fictional foreign-format file, then checks that the copier refuses it:
+#+
+#+  @'
+#+from pathlib import Path
+#+import sqlite3
+#+
+#+path = Path("FOREIGN_TEST_ONLY.sqlite3")
+#+if path.exists():
+#+    raise SystemExit("Choose another unused fictional test filename.")
+#+connection = sqlite3.connect(path)
+#+try:
+#+    connection.execute("CREATE TABLE request (id TEXT PRIMARY KEY)")
+#+    connection.commit()
+#+finally:
+#+    connection.close()
+#+print("Fictional foreign-table test database created.")
+#+'@ | python -
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" store-copy --source ".\FOREIGN_TEST_ONLY.sqlite3" --destination ".\FOREIGN_COPY_MUST_NOT_EXIST.sqlite3"
+#+  Test-Path -LiteralPath '.\FOREIGN_COPY_MUST_NOT_EXIST.sqlite3'
+#+
+#+EXPECT
+#+FAIL with foreign_schema, exit 1, and Test-Path False. The source stays intact
+#+and the destination is not created. Use the fictional test file, rather than
+#+experimenting on the live pricing database. Record this result.
+#+
+#+4. CHECK THE RUNTIME, FOCUSED TESTS AND LATEST-RUN LAUNCH
+#+
+#+From the kit folder on EACH actual PC:
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" environment
+#+
+#+EXPECT
+#+COMPLETED and the actual runtime/package availability. Compare with the
+#+successful app interpreter. Record differences before choosing a dependency
+#+change. This command makes no SLD read or immutable daily capture.
+#+
+#+Run focused tests inside the pilot app. CMD/Miniconda Prompt:
+#+
+#+  pushd "..\Coupon Lab Pilot"
+#+  python -B -m unittest discover -s tests -p "test_daily*.py" -v
+#+  echo %ERRORLEVEL%
+#+  popd
+#+
+#+PowerShell equivalent:
+#+
+#+  Push-Location -LiteralPath '..\Coupon Lab Pilot'
+#+  python -B -m unittest discover -s tests -p 'test_daily*.py' -v
+#+  $LASTEXITCODE
+#+  Pop-Location
+#+
+#+The immediate exit code should be 0, with a nonzero discovered test count and
+#+no failures/errors. Home installed-copy evidence was 80 Daily tests and an
+#+800-test selftest on Python 3.12. Those are synthetic home observations. Record
+#+the actual office results. The earlier office baseline reported eight failures
+#+and three errors among 722 tests; identify any retained baseline differences
+#+separately from new Daily failures. Use the matching full selftest once after
+#+focused checks pass:
+#+
+#+  pushd "..\Coupon Lab Pilot"
+#+  python -B run_coupon_lab.py selftest
+#+  popd
+#+
+#+The pushd/popd lines above are CMD syntax; use Push-Location/Pop-Location in
+#+PowerShell. Save internal output to a per-PC temporary/evidence folder if you
+#+need to inspect a long failure. Include test name, safe stage and actual result
+#+in WORKLOG. Zero tests is not a pass. Preserve the office's chosen freshness
+#+behavior while diagnosing a baseline mismatch.
+#+
+#+In settings.json, verify output_folder points to the usual completed monthly
+#+outputs. The copied app may need an absolute shared output path if those runs
+#+were not copied. Relative paths resolve beside settings.json. latest.json
+#+must refer to an existing complete run. Keep its manifest, snapshot and
+#+reconciliation files together.
+#+
+#+Double-click the PILOT Start_Coupon_Lab.bat on each PC. For visible startup
+#+diagnostics in CMD from the kit folder:
+#+
+#+  call "..\Coupon Lab Pilot\Start_Coupon_Lab.bat"
+#+
+#+In PowerShell:
+#+
+#+  & '..\Coupon Lab Pilot\Start_Coupon_Lab.bat'
+#+
+#+EXPECT
+#+The latest completed monthly run opens. No monthly preparation begins. Open
+#+Reports > Daily Reporting. The prior business day is selected by default.
+#+An uncaptured past day shows unavailable source figures while manual entries
+#+remain available. A missing capture must not become zero activity.
+#+
+#+IF IT FAILS
+#+For interpreter failure, use the verified per-PC Python selection. For an
+#+occupied local port, run the pilot from its folder with a free local port:
+#+
+# COPY BLOCK 25
+#+  python run_coupon_lab.py start --latest --port 8055
+#+
+#+Use the printed loopback URL. Two different PCs may use the same port because
+#+each runs its own local server. A latest-pointer failure needs a valid pointer
+#+and complete run, or an explicitly chosen completed run through the existing
+#+office launch route. Do not launch start without --run/--latest to work around
+#+it, because that route can prepare fresh monthly data.
+#+
+#+5. RECONCILE A DAILY READ BEFORE SAVING IT
+#+
+#+Start with Thursday 26 November, then Friday 27 November. The diagnostic runner
+#+reads the selected source date without opening the manual store or saving an
+#+immutable capture:
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" source --date 2026-11-26
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" source --date 2026-11-27
+#+
+#+EXPECT
+#+COMPLETED with request counts, observed trade counts, coverage flags, missing
+#+field counts, source-read elapsed time and immutable_capture_written false.
+#+COMPLETED means the read ran; it can still report provisional or missing data.
+#+An unsupported required source role fails with a stage and next action.
+#+
+#+For detailed financial reconciliation inside the office, use the app's preview
+#+from its own folder. The following is CMD syntax:
+#+
+#+  pushd "..\Coupon Lab Pilot"
+#+  python run_coupon_lab.py daily-capture --date 2026-11-26 --preview
+#+  popd
+#+
+#+Use Push-Location/Pop-Location in PowerShell. The preview does not save the
+#+immutable source capture. Keep its real financial output in the office.
+#+
+#+Complete the desk/Activity Monitor versus preview rows in WEEKEND_RETURN or
+#+WORKLOG. Record day, read/cutoff, scope and FX basis. Delta means preview minus
+#+the agreed desk/reference value. The original Activity Monitor's created-today,
+#+state, channel and required-fee filters may define a different population.
+#+Explain that difference instead of requiring unlike cohorts to match blindly.
+#+
+#+CHECK THE SOURCE CONTRACT WITH INTERNAL GPT-5.1
+#+
+#+Requests
+#+  Count every distinct SLD request ID on its Zurich creation day, including
+#+  each new repricing ID. Provider responses do not add requests. Use local
+#+  midnight inclusive and next midnight exclusive. Product/state/fee joins must
+#+  preserve requests. eFlow + voiceflow + unknown must conserve the total.
+#+  Verify the actual Excel Manual-profile expression at work. Missing profile
+#+  remains unknown. The pilot's p.USER_PROFILE_NAME candidate is provisional
+#+  until checked; profile_confirmed is an evidence flag, not a shortcut.
+#+
+#+Trades
+#+  Use eligible product INITIAL_FIXING on the selected day, including products
+#+  created earlier. Verify ACTIVE/ISSUING against the actual desk execution
+#+  rule. Confirm request.ISSUE_ID -> product.ID and the selected RFQ/product
+#+  revision/cardinality. Distinguish eligible rows from unresolved/orphan links.
+#+  Incomplete trade coverage withholds headline totals while keeping matched
+#+  and unresolved rows visible. Request counts can still be usable separately.
+#+
+#+Terms and provider
+#+  Verify SLD amount units, original currency, product type, underlyings and
+#+  platform. The earlier voice pricing size_mln field does not establish SLD
+#+  AMOUNT units. Inspect an actual executing hedge, including an internal one.
+#+  Resolve the singular/plural hedge-table spelling. Multiple quotes or the
+#+  best-price view do not establish the executed provider. Set provider_confirmed
+#+  only after checking the actual winner/part/revision rule.
+#+
+#+FX
+#+  Use the reviewed existing monthly CHF_per_unit reference. The pilot chooses
+#+  each currency's latest available reviewed month on or before the selected
+#+  reporting month and retains the used rate/month. CHF identity is one.
+#+  Check the quote direction, native units, reviewed flag/provenance and missing
+#+  cells. Missing foreign FX retains the trade/original amount and makes its
+#+  CHF contribution unavailable. A partial CHF sum must not look complete.
+#+  Test CHF 499,999, 500,000 and 500,001: only the last enters the strict large-
+#+  eFlow detail list. Test foreign conversion before that threshold decision.
+#+
+#+PnL
+#+  First issuance PnL is annual decimal margin x native notional x years.
+#+  Map the actual Excel PA/TOTAL fees, signs, joins and lifetime convention.
+#+  The default pilot has no invented margin/lifetime formula. NULL inputs keep
+#+  affected PnL unavailable while preserving the request, trade and original size.
+#+  An office-confirmed PNL_NATIVE alias can supply the native result directly.
+#+
+#+FICTIONAL SCALE CHECK
+#+  Suppose raw annual margin is 1.2 percentage points, native USD notional is
+#+  1,000,000 and lifetime is 1.5 years. margin_scale 0.01 gives decimal 0.012.
+#+  Native PnL = 1.2 x 0.01 x 1,000,000 x 1.5 = USD 18,000.
+#+  With an invented CHF-per-USD factor 0.90, notional = CHF 900,000 and
+#+  PnL = CHF 16,200. This product exceeds CHF 500,000.
+#+  If raw annual margin is already 0.012, its scale is 1 instead. If the verified
+#+  lifetime input is 18 months under a simple months/12 convention, the SELECT
+#+  returns 1.5 as LIFETIME_YEARS. Use the desk's actual convention once confirmed.
+#+  This invented example checks representation and arithmetic. It supplies no
+#+  real FX rate, booked profit or office product-specific fee definition.
+#+
+#+PROMPT FOR INTERNAL GPT-5.1
+#+Inspect coupon_lab/daily_source.py and our Activity Monitor SQL/Power Query
+#+internally. Verify the request and initial-fixing populations, exact Manual
+#+profile, winning hedge, units and PA/TOTAL financial joins. Reuse the approved
+#+office connection and existing runtime. Put reviewed expressions under
+#+daily_reporting.source in settings.json. Preserve missing values and one RFQ
+#+per trade. Use profile_confirmed/provider_confirmed only after verification.
+#+The module documents canonical aliases and :day_start/:day_end binds. If needed,
+#+save the reviewed full SELECT in an office-local request_sql_file/trade_sql_file
+#+relative to settings.json. Return PNL_NATIVE or verified MARGIN_PA,
+#+LIFETIME_YEARS and explicit margin_scale. Run preview, compare the desk table,
+#+explain one mismatch and rerun the affected case. Keep our private SQL internal.
+#+
+#+IF IT FAILS
+#+Keep the stage, source role/field and suggested action. A required read failure
+#+leaves the last-good source unchanged. Optional provider/FX/PnL gaps remain
+#+explicit. Keep independently checked figures progressing. Do not save a real
+#+day just to hide an unresolved required population error.
+#+
+#+6. RUN THE DEDICATED TWO-PC SHARED-STORE PROBE
+#+
+#+Both PCs use the same pilot settings/store path. The diagnostic derives a
+#+separate sibling TEST database named <store stem>.office-share-test.sqlite3.
+#+For the default live filename this is daily.office-share-test.sqlite3. If you
+#+selected daily_friday_test.sqlite3, its probe is
+#+daily_friday_test.office-share-test.sqlite3. It writes no production entries.
+#+
+#+Run from each PC's kit folder with its own approved Python environment:
+#+
+#+PC A, initialize once:
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" share-init
+#+
+#+PC B, inspect the same probe:
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" share-check
+#+
+#+EXPECT
+#+The same random probe_id and current_revision 1 on both PCs. Re-running
+#+share-init retains the existing marked test probe. If a prior test already
+#+advanced its revision, record the actual value N and use N consistently below.
+#+
+#+PC A, accept one update and retain its explicit retry token:
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" share-update --expected-revision 1 --token friday-A-update-1
+#+
+#+Repeat that SAME command on A:
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" share-update --expected-revision 1 --token friday-A-update-1
+#+
+#+EXPECT
+#+Both return the accepted operation revision 2. The replay creates no additional
+#+revision/entry. Use a new token for a genuinely new intentional operation. If
+#+you restarted an existing probe at N, replace expected revision 1 with N and
+#+use a new distinct token tied to that test attempt.
+#+
+#+PC B, deliberately attempt the stale revision with a DIFFERENT token:
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" share-update --expected-revision 1 --token friday-B-stale-1
+#+
+#+EXPECT
+#+CONFLICT and exit 3. Check the immediate code in CMD with echo %ERRORLEVEL%,
+#+or in PowerShell with $LASTEXITCODE. A stale conflict is the intended result.
+#+Then B runs:
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" share-check
+#+
+#+EXPECT
+#+The same probe_id, current_revision 2 and retained revision history. Restart
+#+the clients/terminals and repeat share-check on both PCs. Verify the same
+#+committed state. To test changed-content reuse, reuse A's token with expected
+#+revision 2; expect retry_conflict/exit 1 and no third revision. Then share-check
+#+must still show revision 2. Record actual lock/wait/errors and timing.
+#+
+#+IF IT FAILS
+#+Different probe IDs mean different physical files or path selection. Confirm

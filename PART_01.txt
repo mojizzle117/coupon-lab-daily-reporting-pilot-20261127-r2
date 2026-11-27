@@ -1,0 +1,503 @@
+r"""Coupon Lab | Friday 27 November 2026 | text-only office pilot r2
+
+In the office, paste this entire file into a blank plain-text editor, including
+the final "# END OFFICE PAYLOAD" line. Save as COPY_ME_FIRST.py.txt, UTF-8,
+in a handoff folder beside the shared pilot app copy. With Miniconda Prompt
+open in the handoff folder, run:
+
+    python COPY_ME_FIRST.py.txt --guide
+
+Open FRIDAY_OFFICE_GUIDE.txt. It includes setup, both options for the database,
+and the Friday checks. WEEKEND_RETURN.txt is your results sheet. Use only a
+copy of the working office app for the pilot. Example installer commands:
+
+    python COPY_ME_FIRST.py.txt --app "..\Coupon Lab Pilot" --check
+    python COPY_ME_FIRST.py.txt --app "..\Coupon Lab Pilot" --apply
+
+The content below is plain-text source. From "# BEGIN OFFICE PAYLOAD" to the
+end, the numbered COPY BLOCK lines can be used to paste in smaller sections
+in the same order. The script checks the embedded files before extracting or
+applying them. Use the working Coupon Lab environment (Python 3.12 or newer)
+for the pilot and its tests.
+"""
+
+import argparse
+import csv
+from datetime import datetime
+import difflib
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+PAYLOAD_SHA256 = "3dd86745b05617cd066fca73913cd055aea13394514a5e57726d6180196ff42d"
+COPY_ERROR = ("The pasted source is incomplete or changed. Paste the entire text into a "
+              "blank file again, from the first line through '# END OFFICE PAYLOAD', then retry.")
+
+
+def read_payload():
+    source = Path(__file__).read_text(encoding="utf-8-sig").split("\n")
+    try:
+        start = source.index("# BEGIN OFFICE PAYLOAD")
+        end = source.index("# END OFFICE PAYLOAD", start + 1)
+    except ValueError:
+        raise ValueError(COPY_ERROR) from None
+    if any(line.strip() for line in source[end + 1:]):
+        raise ValueError(COPY_ERROR)
+    kit = None
+    companions = {}
+    current = None
+    older, newer = [], []
+
+    def finish_record():
+        if current is None:
+            return
+        new_text = "\n".join(newer) + ("\n" if current["new_lf"] else "")
+        name = current["name"]
+        if current["kind"] == "companion":
+            if name in companions:
+                raise ValueError(COPY_ERROR)
+            companions[name] = new_text
+        elif current["kind"] == "app" and name not in kit["files"]:
+            old_text = None
+            if "old_lf" in current:
+                old_text = "\n".join(older) + ("\n" if current["old_lf"] else "")
+            kit["files"][name] = {"base": old_text, "new": new_text}
+        else:
+            raise ValueError(COPY_ERROR)
+
+    for line in source[start + 1:end]:
+        if line.startswith("# COPY BLOCK "):
+            continue
+        if line.startswith("# METADATA ") and kit is None:
+            kit = json.loads(line.removeprefix("# METADATA "))
+            kit["files"] = {}
+        elif line.startswith("# FILE ") and kit is not None:
+            finish_record()
+            current = json.loads(line.removeprefix("# FILE "))
+            older, newer = [], []
+        elif current is not None and line[:2] in ("#=", "#-", "#+"):
+            if line[1] in "=-":
+                older.append(line[2:])
+            if line[1] in "=+":
+                newer.append(line[2:])
+        else:
+            raise ValueError(COPY_ERROR)
+    finish_record()
+    canonical = json.dumps([kit, companions], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if hashlib.sha256(canonical.encode("utf-8")).hexdigest() != PAYLOAD_SHA256:
+        raise ValueError(COPY_ERROR)
+    return kit, companions
+
+
+def write_guides(companions):
+    directory = Path(__file__).resolve().parent
+    for name, value in companions.items():
+        path = directory / name
+        try:
+            with path.open("x", encoding="utf-8") as handle:
+                handle.write(value)
+        except FileExistsError:
+            if path.read_text(encoding="utf-8-sig") != value:
+                print(f"Kept your changed {name}. To recover the supplied version, paste this installer into a new folder and run --guide there.")
+            else:
+                print(f"Already present: {name}")
+        else:
+            print(f"Created {name}")
+    print(f"Open FRIDAY_OFFICE_GUIDE.txt in {directory}")
+
+
+def body(raw):
+    return raw.decode("utf-8-sig").replace("\r\n", "\n")
+
+
+def encode_like(value, original):
+    if b"\r\n" in original:
+        value = value.replace("\n", "\r\n")
+    codec = "utf-8-sig" if original.startswith(b"\xef\xbb\xbf") else "utf-8"
+    return value.encode(codec)
+
+
+def merge_code(path, current, base, proposed):
+    if current == proposed:
+        return current
+    if current == base:
+        return proposed
+    if base is None or current is None:
+        raise ValueError(f"{path}: file differs or is missing. Use --export to inspect the update.")
+    if not shutil.which("git"):
+        raise ValueError(f"{path}: office edits detected. Use local Git for the merge, or --export for a manual merge.")
+    with tempfile.TemporaryDirectory() as temp:
+        files = [Path(temp) / key for key in ("office", "baseline", "pilot")]
+        for dest, content in zip(files, (current, base, proposed)):
+            dest.write_bytes(content.encode("utf-8"))
+        result = subprocess.run(["git", "merge-file", "-p", *files], capture_output=True)
+    if result.returncode:
+        raise ValueError(f"{path}: overlapping office edits. Use --export, merge the patch in your office copy, and rerun --check.")
+    return result.stdout.decode("utf-8")
+
+
+def merge_products(raw, additions, platform_a):
+    reader = csv.DictReader(io.StringIO(body(raw)))
+    rows = list(reader)
+    fields = reader.fieldnames
+    if not fields or any(key not in fields for key in additions[0]):
+        raise ValueError("Product mapping columns differ. Review the additions in the payload.")
+    extra = io.StringIO()
+    writer = csv.DictWriter(extra, fields, lineterminator="\r\n" if b"\r\n" in raw else "\n")
+    for row in additions:
+        matches = [old for old in rows if old["Platform"] in platform_a and old["Source_product"] == row["Source_product"]]
+        if len(matches) == 1 and all(matches[0][key].strip().casefold() == row[key].strip().casefold()
+                                     for key in ("Common_product", "Barrier", "Capped", "Reviewed")):
+            continue
+        if matches:
+            raise ValueError("A target product mapping is duplicated or has different attributes. Reconcile the two target labels before applying.")
+        # Preserve the office's platform spelling when its reviewed reference
+        # uses a private brand assignment. Otherwise use the canonical slot.
+        spelling = next((old["Platform"] for old in rows if old["Platform"] in platform_a), row["Platform"])
+        writer.writerow({**row, "Platform": spelling})
+    if not extra.tell():
+        return raw
+    return raw + (b"" if raw.endswith(b"\n") else b"\n") + extra.getvalue().encode("utf-8")
+
+
+def checked_target(app, relative):
+    path = (app / relative).resolve()
+    if not path.is_relative_to(app):
+        raise ValueError("A target path lies outside the office copy. Copy its reference inside the pilot folder and update its setting.")
+    return path
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Coupon Lab copy-paste office pilot r2")
+    parser.add_argument("--app", type=Path, default=Path.cwd())
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--guide", action="store_true", help="write the guide, office checks and return sheet beside this file")
+    modes.add_argument("--check", action="store_true", help="check the pilot app copy without changing it")
+    modes.add_argument("--apply", action="store_true", help="apply to the pilot app copy, with a backup")
+    modes.add_argument("--export", type=Path, metavar="NEW_FOLDER", help="write patch references for an office manual merge")
+    args = parser.parse_args()
+    kit, companions = read_payload()
+    if args.guide:
+        write_guides(companions)
+        return
+    if args.export:
+        args.export.mkdir(parents=True, exist_ok=False)
+        for name, change in kit["files"].items():
+            target = checked_target(args.export.resolve(), name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(change["new"].encode("utf-8"))
+            if change["base"] is not None:
+                patch = difflib.unified_diff(change["base"].splitlines(True), change["new"].splitlines(True), name, name)
+                target.with_name(target.name + ".patch").write_text("".join(patch), encoding="utf-8")
+        print("Exported pilot files and changes for an internal manual merge.")
+        return
+    app = args.app.resolve()
+    if not (app / "run_coupon_lab.py").is_file() or not (app / "settings.json").is_file():
+        raise ValueError("Pass --app pointing to the COPY containing run_coupon_lab.py and settings.json.")
+    changes = {}
+    for name, change in kit["files"].items():
+        path = checked_target(app, name)
+        raw = path.read_bytes() if path.exists() else None
+        current = body(raw) if raw is not None else None
+        merged = merge_code(name, current, change["base"], change["new"])
+        if merged != current:
+            changes[path] = (raw, encode_like(merged, raw if raw is not None else b""))
+    settings = checked_target(app, "settings.json")
+    raw = settings.read_bytes()
+    cfg = json.loads(raw.decode("utf-8-sig"))
+    daily = cfg.setdefault("daily_reporting", {})
+    if not isinstance(daily, dict):
+        raise ValueError("Expected daily_reporting to be an object in settings.json.")
+    for key, value in kit["settings"].items():
+        daily.setdefault(key, value)
+    if cfg != json.loads(raw.decode("utf-8-sig")):
+        changes[settings] = (raw, encode_like(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", raw))
+    mapping = checked_target(app, cfg.get("references", {}).get("products", "reference/product_mappings.csv"))
+    raw = mapping.read_bytes()
+    platform_a = {"PLATFORM_A"}
+    registry = app / cfg.get("brand_repository", "brand_repository.json")
+    if registry.is_file():
+        brand = json.loads(registry.read_text(encoding="utf-8-sig"))["brands"]["platform_a"]
+        platform_a.update([brand.get("name"), brand.get("source_code"), *brand.get("source_aliases", [])])
+    mapped = merge_products(raw, kit["products"], platform_a)
+    if mapped != raw:
+        changes[mapping] = (raw, mapped)
+    print(f"{kit['version']} | {len(changes)} files to update.")
+    for path in changes:
+        print("  " + str(path.relative_to(app)))
+    if not args.apply or not changes:
+        return
+    backup = Path(tempfile.mkdtemp(prefix="coupon_daily_backup_" + datetime.now().strftime("%Y%m%d") + "_", dir=app.parent))
+    for path, (raw, _) in changes.items():
+        if raw is not None:
+            dest = backup / path.relative_to(app)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(raw)
+    written = []
+    try:
+        for path, (before, after) in changes.items():
+            if (path.read_bytes() if path.exists() else None) != before:
+                raise ValueError("Another process changed a target after the check. Close the pilot copy and try again.")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as staged:
+                staged.write(after)
+            try:
+                os.replace(staged.name, path)
+            finally:
+                Path(staged.name).unlink(missing_ok=True)
+            written.append(path)
+    except Exception:
+        for path in reversed(written):
+            before = changes[path][0]
+            if before is None:
+                path.unlink()
+            else:
+                path.write_bytes(before)
+        raise
+    print(f"Installed. Originals are in the sibling folder {backup.name}. Follow FRIDAY_OFFICE_GUIDE.txt.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"Pilot installation stopped. {error}", file=sys.stderr)
+        sys.exit(1)
+
+# BEGIN OFFICE PAYLOAD
+# COPY BLOCK 1
+# METADATA {"version": "daily-reporting-office-20261127-r2", "settings": {"store": "../coupon_lab_reporting/daily.sqlite3", "holidays": []}, "products": [{"Platform": "PLATFORM_A", "Source_product": "Autocallable Worst-of Equity Reverse Convertible with Conditional Coupon", "Common_product": "Reverse Convertible", "Barrier": "No", "Capped": "Not applicable", "Reviewed": "true", "Note": "User-agreed common base family; exact source label retained. Callability, actual basket and FX qualification remain separate."}, {"Platform": "PLATFORM_A", "Source_product": "Autocallable Equity Barrier Reverse Convertible with Conditional Coupon", "Common_product": "Barrier Reverse Convertible", "Barrier": "Yes", "Capped": "Not applicable", "Reviewed": "true", "Note": "User-agreed common base family; exact source label retained. Callability, actual basket and FX qualification remain separate."}]}
+# FILE {"kind": "app", "name": "build_transfer.py", "new_lf": true, "old_lf": true}
+#="""Build a clean, readable TXT installer without changing application source.
+#=
+#=Input: the approved source files below, generic settings and an unused connection
+#=hook. Output: a NEW transfer folder with TXT, SHA256 and release manifest.
+#=Dependencies: Python standard library only. No source code is imported/executed.
+#=Build from clean development source, never a configured office application.
+#="""
+#=from __future__ import annotations
+#=
+#=import argparse
+#=import ast
+#=import base64
+#=import hashlib
+#=import json
+#=from pathlib import Path, PurePosixPath
+#=import pprint
+#=import re
+#=import shutil
+#=import tempfile
+#=
+#=ROOT = Path(__file__).resolve().parent
+#=# Only these root files and dedicated source trees can enter the installer.
+#=# Adding another tree is a deliberate packaging decision, not automatic discovery.
+#=ROOT_FILES = (
+#=    "00_FIRST_OFFICE_RUN.txt", "00_START_WITH_GPT.txt", "README.txt", "changed_OPERATOR_README.md", "SCHEMA.md",
+#=    "Start_Coupon_Lab.bat", "Start_Coupon_Lab.command", "build_transfer.py",
+#=    "office_connection.py", "prepare_underlying_master.py", "requirements.txt",
+#=    "run_coupon_lab.py", "settings.json", "brand_repository.json",
+#=    "domino_app.sh", "domino.env.example", ".gitattributes", ".gitignore",
+#=)
+#=DOMINO_REQUIRED_FILES = {
+#=    "domino_app.sh", "domino.env.example", ".gitattributes", ".gitignore",
+#=    "coupon_lab/domino_app.py", "tools/prepare_domino_smoke.py", "docs/35_DOMINO_INSTALL_AND_RUN.txt",
+#=}
+#=TREE_SUFFIXES = {
+#=    "coupon_lab": {".py", ".json", ".css", ".js", ".png"},
+#=    "docs": {".txt", ".md", ".csv"},
+#=    "reference": {".csv", ".json", ".txt"},
+#=    "tests": {".py"},
+#=    "tools": {".py"},
+#=    "examples": {".txt", ".csv", ".json"},
+#=}
+#=IGNORED_DIRS = {"__pycache__", ".pytest_cache", ".venv", "inputs", "outputs"}
+#=# Bulk listing/acquisition evidence belongs to home research. The office app
+#=# uses the reviewed master CSV; retaining these snapshots in each installer
+#=# would add many megabytes without adding a runtime or maintenance dependency.
+#=DEVELOPMENT_TREES = {"reference/underlying_sources"}
+#=PUBLIC_TABLES = {
+#=    "requests": "SLD_QUOTE_REQUEST", "products": "SLD_PRODUCT",
+#=    "hedges": "SLD_PRODUCT_HEDGE_DETAIL", "indicative": "SLD_INDICATIVE_QUOTE_REASON",
+#=    "validation": "SLD_PRODUCT_VALIDATION_ERROR",
+#=    "provider_validation": "SLD_HEDGE_PROVIDER_VALIDATION_ERROR",
+#=    "admin": "ISS_ADMIN_UNDERLYING",
+#=}
+#=PLACEHOLDER_MESSAGE = (
+#=    "Office connection hook is not configured. Edit office_connection.py "
+#=    "at work to return a fresh connection using your approved mechanism. "
+#=    "See docs/01_RUN_AND_CONNECT.txt."
+#=)
+#=
+#=
+#=def _without_docstring(body):
+#=    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+#=        return body[1:]
+#=    return body
+#=
+#=
+#=def is_unconfigured_connection(source):
+#=    """Inspect executable syntax; a marker comment cannot approve office code."""
+#=    try:
+#=        tree = ast.parse(source)
+#=        body = _without_docstring(tree.body)
+#=        if len(body) != 2 or not isinstance(body[0], ast.Assign) or not isinstance(body[1], ast.FunctionDef):
+#=            return False
+#=        marker, function = body
+#=        if len(marker.targets) != 1 or not isinstance(marker.targets[0], ast.Name) or marker.targets[0].id != "TRANSFER_PLACEHOLDER":
+#=            return False
+#=        if not isinstance(marker.value, ast.Constant) or marker.value.value is not True:
+#=            return False
+#=        expected = ast.parse("def open_connection():\n    raise RuntimeError(" + repr(PLACEHOLDER_MESSAGE) + ")").body[0]
+#=        # Comments and docstrings may change; all executable syntax stays inert.
+#=        function.body = _without_docstring(function.body)
+#=        return ast.dump(function, include_attributes=False) == ast.dump(expected, include_attributes=False)
+#=    except (SyntaxError, ValueError, TypeError):
+#=        return False
+#=
+#=
+#=def source_version(root):
+#=    """Read the one literal version without importing the package or its code."""
+#=    try:
+#=        tree = ast.parse((Path(root) / "coupon_lab" / "__init__.py").read_text(encoding="utf-8"))
+#=        assignments = [node for node in ast.walk(tree) if isinstance(node, ast.Name)
+#=                       and isinstance(node.ctx, ast.Store) and node.id == "VERSION"]
+#=        definitions = [node for node in tree.body if isinstance(node, ast.Assign)
+#=                       and len(node.targets) == 1 and node.targets[0] in assignments]
+#=        if len(assignments) != 1 or len(definitions) != 1:
+#=            raise ValueError
+#=        value = definitions[0].value
+#=        if not isinstance(value, ast.Constant) or not isinstance(value.value, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", value.value):
+#=            raise ValueError
+#=        return value.value
+#=    except (OSError, SyntaxError, ValueError):
+#=        raise ValueError("Source version is missing or invalid; restore the clean package VERSION literal.") from None
+#=
+#=
+#=def payload_files(root=ROOT):
+#=    """Return approved regular files only; never follow source symlinks."""
+#=    root = Path(root)
+#=    if root.is_symlink() or not root.is_dir():
+#=        raise ValueError("Choose a regular clean source folder, not a symbolic link.")
+#=    result = []
+#=    for name in ROOT_FILES:
+#=        path = root / name
+#=        if path.is_symlink():
+#=            raise ValueError("A selected source file is a symbolic link; restore a clean source copy.")
+#=        if path.is_file():
+#=            result.append(path)
+#=
+#=    def walk(folder, suffixes):
+#=        if folder.is_symlink():
+#=            raise ValueError("A selected source tree contains a symbolic link; restore a clean source copy.")
+#=        if folder.relative_to(root).as_posix() in DEVELOPMENT_TREES:
+#=            return
+#=        if not folder.exists():
+#=            return
+#=        if not folder.is_dir():
+#=            raise ValueError("A selected source tree is not a folder; restore the clean source layout.")
+#=        for path in sorted(folder.iterdir()):
+#=            if path.name in IGNORED_DIRS or path.name.startswith("."):
+#=                continue
+#=            if path.is_symlink():
+#=                raise ValueError("A selected source tree contains a symbolic link; restore a clean source copy.")
+#=            if path.is_dir():
+#=                walk(path, suffixes)
+#=            elif path.is_file() and path.suffix.lower() in suffixes:
+#=                result.append(path)
+#=
+#=    for name, suffixes in TREE_SUFFIXES.items():
+#=        walk(root / name, suffixes)
+#=    return sorted(result)
+#=
+#=
+#=def _local_payload_path(value, names, *, prefix=None):
+#=    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+#=        return False
+#=    path = PurePosixPath(value)
+#=    if path.is_absolute() or ".." in path.parts or str(path) != value:
+#=        return False
+#=    return value in names and (prefix is None or path.parts[0] == prefix)
+#=
+#=
+#=def _validate_settings(data, names):
+#=    """Reject detectable office configuration; this is not a secret-content scan."""
+#=    try:
+#=        cfg = json.loads(data)
+#-        allowed = {"release", "mode", "months", "default_month", "default_platform", "default_population", "app", "runtime", "feedback", "sld", "references", "supported_currencies", "currency_aliases", "ticket_size_bands", "trading_hours", "output_folder", "brand_repository"}
+#+        allowed = {"release", "mode", "months", "default_month", "default_platform", "default_population", "app", "runtime", "feedback", "sld", "references", "supported_currencies", "currency_aliases", "ticket_size_bands", "trading_hours", "output_folder", "brand_repository", "daily_reporting"}
+#=        if not isinstance(cfg, dict) or set(cfg) - allowed or cfg.get("mode", "office") != "office":
+#+            raise ValueError
+#+        if "daily_reporting" in cfg and cfg["daily_reporting"] != {"store": "../coupon_lab_reporting/daily.sqlite3", "holidays": []}:
+#=            raise ValueError
+#=        for section, fields in (("app", {"port"}), ("trading_hours", {"enabled", "open", "close", "timezone"})):
+#=            value = cfg.get(section, {})
+#=            if not isinstance(value, dict) or set(value) - fields:
+#=                raise ValueError
+#=        runtime = cfg.get("runtime", {})
+#=        if not isinstance(runtime, dict) or set(runtime) - {"python"} or runtime.get("python", "") != "":
+#=            raise ValueError
+#=        if cfg.get("brand_repository", "brand_repository.json") != "brand_repository.json":
+#=            raise ValueError
+#=        if cfg.get("output_folder", "outputs") != "outputs":
+#=            raise ValueError
+#=        feedback = cfg.get("feedback")
+#=        if not isinstance(feedback, dict) or set(feedback) != {"platform_a", "platform_b"}:
+#=            raise ValueError
+#=        permitted_feedback = {"enabled", "platform", "folder", "patterns", "pattern", "sheet", "header_row", "date_formats", "columns", "decimal_separator", "thousands_separator"}
+#=        for role, spec in feedback.items():
+#=            if not isinstance(spec, dict) or set(spec) - permitted_feedback or spec.get("folder") != "inputs/" + role:
+#=                raise ValueError
+#=            columns = spec.get("columns", {})
+#=            permitted_columns = {"id", "date", "size", "currency", "product", "status", "winner", "underlyings", "isin", "asset_types", "callability", "reported_chf", "rejection", "solve_for"}
+#=            if not isinstance(columns, dict) or set(columns) - permitted_columns:
+#=                raise ValueError
+#=            patterns = spec.get("patterns", [spec.get("pattern", "*.xlsx")])
+#=            if not isinstance(patterns, list) or any(not isinstance(value, str) or any(part in value for part in ("/", "\\", "..", ":")) for value in patterns):
+#=                raise ValueError
+#=        sld = cfg.get("sld")
+#=        if not isinstance(sld, dict) or set(sld) - {"connection_module", "chunk_size", "roles"} or sld.get("connection_module") != "office_connection.py":
+#=            raise ValueError
+#=        roles = sld.get("roles", {})
+#=        if not isinstance(roles, dict) or set(roles) - set(PUBLIC_TABLES):
+#=            raise ValueError
+#=        for role, spec in roles.items():
+#=            if not isinstance(spec, dict) or set(spec) - {"enabled", "table"} or spec.get("table") != PUBLIC_TABLES[role]:
+#=                raise ValueError
+#=        references = cfg.get("references")
+#=        if not isinstance(references, dict) or not references or any(not _local_payload_path(value, names, prefix="reference") for value in references.values()):
+#=            raise ValueError
+#=    except (ValueError, TypeError, AttributeError):
+#=        raise ValueError("Settings contain configured/private or unsupported values. Build only from the clean generic settings template; keep office settings internal.") from None
+#=
+#=
+#=def _validate_brand_repository(data):
+#=    """Clean delivery contains neutral assignments only; private profiles stay local."""
+#=    try:
+#=        slots = ("platform_a", "platform_b", "issuer", "provider_a", "provider_b", "provider_c")
+#=        entries = {}
+#=        for slot in slots:
+#=            entry = {"name": slot.replace("_", " ").title(), "source_aliases": [slot.upper()], "source_code": slot.upper()}
+#=            if slot not in slots[:2]:
+#=                entry["admin_column"] = None
+#=            entries[slot] = entry
+#=        if json.loads(data) != {"schema_version": 1, "brands": entries}:
+#=            raise ValueError
+#=    except (ValueError, TypeError):
+#=        raise ValueError("Brand repository contains assigned/private values. Build only with the neutral template; keep private names and bindings local.") from None
+#=
+#=
+#=def _destination(root, destination):
+#=    destination = Path(destination).absolute()
+#=    # Reject direct links; canonical containment also catches linked source parents.
+#=    if destination.is_symlink():
+#=        raise ValueError("Transfer destination is a symbolic link; choose a new regular folder.")
+#=    root, destination = root.resolve(), destination.resolve()
+#=    if destination == root or root in destination.parents:
+#=        raise ValueError("Transfer destination must be outside the source folder; source files remain unchanged.")

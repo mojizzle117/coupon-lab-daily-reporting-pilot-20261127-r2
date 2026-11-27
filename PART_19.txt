@@ -1,0 +1,486 @@
+#+the same share/path internally; mapped drive names can differ between PCs.
+#+A path-reference hash is local evidence, not cross-PC file identity. Busy/lock
+#+errors need the actual filesystem/permissions and supported locking assessment.
+#+Do not repeatedly create replacement databases to disguise a failed shared
+#+write test. Two processes on one PC remain a useful narrower test; record
+#+two-PC acceptance as pending if only one PC is available.
+#+
+#+7. EXERCISE THE REAL PAGE AGAINST THE NORMAL TEST STORE
+#+
+#+Use the separate daily_friday_test.sqlite3 normal reporting file from step 3,
+#+not the dedicated marker probe. Open both local apps. Keep fictional entries
+#+clearly recognizable and out of the later live reporting file.
+#+
+#+Today and refresh
+#+  Open Today on A/B, observe a 60-second refresh and click Refresh. Start a
+#+  draft before a timer refresh; it should remain typed. A successful read time
+#+  changes on success. If a source read fails in an isolated test session, the
+#+  same day's last-good figures remain visible with failure status. Selecting
+#+  another day must not show the first day's figures as that new day's result.
+#+  Measure source-read time and browser completion on both actual PCs. More
+#+  local apps can mean more SLD queries. Record the observed load; the one-minute
+#+  refresh setting is not evidence that a read always finishes within a minute.
+#+
+#+Reproducible failed-refresh check in an ISOLATED copy
+#+  Make a separate failure-test app copy and give it its own normal TEST store.
+#+  With internal GPT-5.1, save its already verified request SELECT to the local
+#+  file office_daily_requests_TEST.sql, including the required aliases and
+#+  :day_start/:day_end binds. Set only this copy's
+#+  daily_reporting.source.request_sql_file to that filename BEFORE starting it.
+#+  Launch this copy on a free local port. Open Today and obtain one successful
+#+  read, then note the read time and start an unsaved draft.
+#+
+#+  Leave the app process running. In a separate PowerShell window located in
+#+  that FAILURE-TEST app folder, temporarily rename only its test SQL file:
+#+
+#+    Rename-Item -LiteralPath '.\office_daily_requests_TEST.sql' -NewName 'office_daily_requests_TEST.sql.paused'
+#+
+#+  Press Refresh in that test page. Expect an explicit read failure, the same
+#+  dated last-good figures/read timestamp and retained draft. Restore the file:
+#+
+#+    Rename-Item -LiteralPath '.\office_daily_requests_TEST.sql.paused' -NewName 'office_daily_requests_TEST.sql'
+#+
+#+  Press Refresh again. Expect a successful new read time and retained draft.
+#+  Close only the failure-test process when done. The shared working app's
+#+  configuration, other PCs' SQL files and SLD itself are unaffected.
+#+
+#+  If a valid isolated SQL override cannot be established, run the named
+#+  synthetic fallback from the PILOT app folder and record its narrower scope:
+#+
+#+    python -B -m unittest discover -s tests -p "test_daily_service.py" -k "test_live_failure_preserves_last_read_and_new_manual_additions" -v
+#+    python -B -m unittest discover -s tests -p "test_daily_ui.py" -k "test_failed_read_keeps_same_day_last_good_without_raw_error" -v
+#+
+#+  Expect discovered tests and exit 0. This verifies fictional service/UI
+#+  failure handling; actual office-source failure/recovery remains pending.
+#+
+#+Win and pre-hedge
+#+  On the selected day add a fictional win with product type and blank final
+#+  size. It adds one subscription win and no trade. Add a pre-hedge with its
+#+  known terms. It stays in its separate list outside main volume and PnL.
+#+  B refreshes and sees the same saved entries. No editor identity is required.
+#+
+#+Issuance already in SLD
+#+  Use an internally reviewed displayed voice trade from the selected day.
+#+  Add an issuance linked to that exact SLD trade ID. It contributes once to
+#+  the voice trade headline. Its row appears once in subscription issuances
+#+  and is removed from the ordinary voice detail list. A second entry linking
+#+  the same trade should conflict rather than duplicate the trade.
+#+
+#+Unmatched issuance
+#+  Add a fictional issuance with positive final amount/currency and no SLD link
+#+  in the TEST store. It remains pending and does not yet add a trade. Select
+#+  it and confirm it is missing from SLD only after the intended desk check.
+#+  It then counts once. Similar SLD terms can trigger a possible-duplicate
+#+  warning and a provisional voice headline. A later exact SLD link resolves
+#+  the overlap and retains one counted trade. Test this with an approved case
+#+  or fictional source fixtures; do not alter SLD to manufacture an arrival.
+#+
+#+Stale action, retry and removal
+#+  Select the same entry on A and B. A links or removes it. B then attempts an
+#+  action from its old selection. Expect conflict and retained draft. Refresh,
+#+  inspect the newer state, then select it again. An immediate retry of the
+#+  identical accepted operation must not create another entry/revision. Starting
+#+  another intentional entry is a different action. Remove fictional entries
+#+  from B and verify A sees removal after refresh and after both apps restart.
+#+
+#+PROMPT FOR INTERNAL GPT-5.1
+#+Walk us through these checks with two actual local app instances and the normal
+#+test store. Record selected day, entry/test alias, expected and actual revision,
+#+trade headline/list membership, retry result and refresh scope. Reuse exact SLD
+#+trade links; do not match subscriptions automatically from similar terms. Keep
+#+possible duplicates/provisional totals visible. Explain one failure through
+#+daily.py, daily_store.py or ui/daily_reporting.py, fix the cause in the pilot
+#+copy and rerun the affected test. Preserve committed test history for restore.
+#+
+#+8. BACK UP AND RESTORE INTO ISOLATED STATE
+#+
+#+Stop both test app instances and any capture commands writing that reporting
+#+file. Use store-copy from step 3 to copy the NORMAL test reporting database to
+#+a new backup path. The dedicated share probe has an extra table and is not
+#+this restore source. Record the returned counts and integrity result.
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" store-copy --source "ABSOLUTE_NORMAL_TEST_REPORTING_DB" --destination "ABSOLUTE_NEW_BACKUP_DB"
+#+
+#+For a restore rehearsal, copy that reporting backup through the same command
+#+to another unused restored filename. Make a separate restore-check app copy,
+#+set its daily_reporting.store to the restored filename, and run store-check
+#+with --app pointing to that restore-check copy. Its settings and approved
+#+source hook remain internal. Open a saved past day and the stored manual rows.
+#+Verify source read time, entry revisions, removals and retry/history counters.
+#+If no source snapshot has been captured, record that this proof covers manual
+#+state only; saved-source restore remains pending until a checked capture exists.
+#+
+#+A clean-shutdown file copy is an alternative only after ALL writers to this
+#+reporting DB are stopped and their transactions closed. Copy to a new filename
+#+using the normal office copy method. If WAL/journal sidecars remain or clean
+#+shutdown cannot be established, use the supported SQLite backup route instead.
+#+Never delete sidecars or copy an active main .sqlite3 file alone as a recovery
+#+procedure. Keep the accepted original and backup distinguishable.
+#+
+#+IF IT FAILS
+#+Retain the original, backup and failed restored artifact separately. Record the
+#+first integrity/schema/read stage. Restoring an older database after new live
+#+writes requires accounting for those newer writes before switching writers.
+#+The pilot's original app/run remains the fallback for existing monthly reports.
+#+
+#+9. MOVE TO LIVE PILOT DATA AND SAVE THE FIRST SOURCE CAPTURE
+#+
+#+After the test outcomes are understood, stop the test instances. Point the
+#+pilot settings at the chosen fresh dedicated live reporting filename, normally
+#+../coupon_lab_reporting/daily.sqlite3. If retaining prior actual reporting
+#+data, use only the successful current-schema backup copy from step 3. Run
+#+store-init/store-check on this final configured file. Both colleagues must use
+#+the same selection. Keep the fictional test store and probe separate.
+#+
+# COPY BLOCK 26
+#+Reconcile Thursday preview before deciding to retain it:
+#+
+#+  pushd "..\Coupon Lab Pilot"
+#+  python run_coupon_lab.py daily-capture --date 2026-11-26 --preview
+#+  popd
+#+
+#+Stop and review that output. The following SEPARATE block saves the first
+#+immutable source capture. Run it only after the relevant preview/source
+#+findings are accepted or explicitly understood as provisional:
+#+
+#+  pushd "..\Coupon Lab Pilot"
+#+  python run_coupon_lab.py daily-capture --date 2026-11-26
+#+  popd
+#+
+#+A first Thursday capture
+#+made Friday is reconstructed from Friday's observations. It does not recover
+#+Thursday evening's exact states, fee values or what the desk knew at that time.
+#+Current source state cannot manufacture a historical read that was never saved.
+#+
+#+Save Friday once near the actual desk close, or use Save day snapshot
+#+on the page after checking its selected day. The equivalent command is:
+#+
+#+  pushd "..\Coupon Lab Pilot"
+#+  python run_coupon_lab.py daily-capture --date 2026-11-27
+#+  popd
+#+
+#+Record the operator/test alias and source read time. This is observations
+#+through the read time. An evening capture before midnight does not include
+#+later activity in the full calendar-day window. Record the desk's intended
+#+cut and treatment of late activity. The first pilot is a manual close; it
+#+creates no scheduled unattended job. A process must be running on an available
+#+host for a future automatic capture. A shared folder cannot execute it alone.
+#+
+#+Reopening a saved day and repeating capture preserves its first SLD capture,
+#+including its used FX factors. Refresh of a past day reads that saved source
+#+and the latest shared manual entries. Test an add/remove against Thursday:
+#+the manual projection changes, while its SLD source read time stays fixed.
+#+Keep source capture time separate from manual change time and page refresh.
+#+
+#+Monday 30 November's previous business day should be Friday 27 November unless
+#+the desk's actual holiday calendar says otherwise. The desired morning ready-
+#+by is 07:30 Zurich. Verify the saved Friday capture is readable after restart.
+#+If nobody captured it before the PCs closed, record the missed manual close.
+#+A Monday source read can be a labelled reconstruction, with that limitation.
+#+
+#+10. VERIFY THE OTHER REQUESTED APP CHANGES
+#+
+#+Platform A mappings
+#+  The two exact source labels should each occur once in the reviewed mapping:
+#+  Autocallable Equity Barrier Reverse Convertible with Conditional Coupon
+#+    -> Barrier Reverse Convertible, Barrier Yes.
+#+  Autocallable Worst-of Equity Reverse Convertible with Conditional Coupon
+#+    -> Reverse Convertible, Barrier No.
+#+  Existing office rows and platform aliases must be retained. Prepared monthly
+#+  runs already contain their recorded classifications. A mapping addition
+#+  affects future preparation; reopening an old completed run alone does not
+#+  replace its embedded classifications. Record the CSV check separately from
+#+  acceptance of a newly prepared monthly run.
+#+
+#+Reason Analysis
+#+  Choose a known RFQ with two Reasons. Exclude one Reason. Its bar disappears;
+#+  matching RFQs leave the selected results, including their contribution to
+#+  other Reasons. The separate Overall population comparison remains fixed.
+#+  The exclusion menu still permits restoring the Reason. Compare selected
+#+  figures and details internally. Check a familiar monthly filter/navigation
+#+  path and a managed-browser PDF after the change.
+#+
+#+11. ACCEPT, LIMIT OR WITHDRAW THE PILOT
+#+
+#+Record separately:
+#+  Installation/repeatability and retained fallback.
+#+  Actual Windows Python discovery and double-click behavior on each PC.
+#+  Focused/full test results and any baseline-only failures.
+#+  Source/financial definitions checked versus still provisional.
+#+  Two actual PCs, locking, retry/stale edits and restored state.
+#+  Read/browser timing, failures and recovery.
+#+  Source captures saved, read times and first-day reconstruction limits.
+#+
+#+Use WEEKEND_RETURN's side-by-side desk/preview table and one worked mismatch.
+#+Record the exact discrepancy, cause confirmed versus hypothesis, smallest fix
+#+and rerun result. Keep unavailable fields explicit. A green install or fictional
+#+test does not establish real-source completeness or financial reconciliation.
+#+
+#+If the pilot is unsuitable, close its local processes and reopen the preserved
+#+working app with its own matching run. Keep reporting entries outside the
+#+application copies. Preserve any new manual writes, the accepted code/run/store
+#+selection and backups before changing the active configuration. The file-level
+#+installer backup is useful evidence; the preserved whole working app is the
+#+simple fallback. Do not overwrite a shared reporting file during rollback.
+#+
+#+12. RESUME WITH INTERNAL GPT-5.1 AND BRING BACK USEFUL FINDINGS
+#+
+#+PROMPT FOR INTERNAL GPT-5.1
+#+Finish WORKLOG and WEEKEND_RETURN with actual outcomes. Give the exact command
+#+to resume each pending task. Separate install checks, fictional tests, one-PC
+#+and two-PC behavior, source observations, internally reconciled figures and
+#+pending acceptance. Complete the desk/preview/delta rows and one worked
+#+mismatch, with a fictional example of any unit error. Keep private SQL, paths,
+#+connections and record traces internal. Produce numbered field meanings,
+#+quality counts, tested behaviors and next actions for me to choose and write
+#+down. I will filter what I bring back. Preserve our shared entries and known
+#+working fallback while fixes continue.
+#+
+#+OPTIONAL INTERNAL JSON EVIDENCE
+#+
+#+Global --output goes BEFORE the runner subcommand and requires a NEW filename:
+#+
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" --output "environment_PC_A_new.json" environment
+#+  python RUN_OFFICE_CHECKS.py.txt --app "..\Coupon Lab Pilot" --output "source_20261127_new.json" source --date 2026-11-27
+#+
+#+Existing output files are not overwritten. Choose a fresh name on repeat.
+#+Without --output the runner prints its result to the terminal. It reports fixed
+#+metadata, aggregate counts, source dates/months and synthetic probe IDs, with
+#+records, financial totals, paths and driver payloads excluded. The existing
+#+app preview is the separate internal tool for the actual financial comparison.
+#+
+#+Diagnostic exit codes
+#+  0  Check completed; inspect its coverage/findings before business acceptance.
+#+  1  Setup/read/validation failure; follow the reported stage/action.
+#+  2  Command syntax problem; compare the exact documented options.
+#+  3  Stale shared-probe revision rejected; expected in the deliberate B test.
+# FILE {"kind": "companion", "name": "WEEKEND_RETURN.txt", "new_lf": true}
+#+COUPON LAB | FRIDAY PILOT RETURN FOR THE WEEKEND
+#+Version daily-reporting-office-20261127-r2
+#+Friday 27 November 2026 | Europe/Zurich
+#+
+#+Use this alongside your internal WORKLOG. Write the useful results by hand.
+#+Choose which findings and examples you bring back. Keep actual private paths,
+#+connection details, records and SQL in the internal worklog. A fictional example
+#+can explain a source unit or calculation without bringing back a real trade.
+#+
+#+Mark each result PASS / FAIL / NOT RUN / UNCONFIRMED. Include the tested scope,
+#+such as one process, two processes on one PC, two actual PCs, or isolated restore.
+#+An installed update, working page and reconciled business figure are different
+#+results. Record what you actually observed.
+#+
+#+1. THE COPY AND THE INSTALL
+#+
+#+Date/time and kit version =
+#+Working copy or source revision, using an internal alias if appropriate =
+#+Pilot copy kept separate from original =
+#+Original still opens with its matching prepared monthly run =
+#+COPY_ME_FIRST --check result / number of files =
+#+--apply result / backup retained =
+#+Repeat --check result / number of files =
+#+Any merge conflict or manual office adjustment =
+#+Configured monthly latest pointer found / selected run matches expectation =
+#+Double-click opened latest prepared run without monthly preparation =
+#+
+#+2. ACTUAL LOCAL RUNTIME
+#+
+#+PC A interpreter/version =
+#+PC B interpreter/version =
+#+Dash / Plotly / Flask / openpyxl / SQLite / other relevant versions =
+#+Python selection used by each double-click launcher =
+#+Startup stage or safe failure message =
+#+Focused daily tests discovered / passed / failed / errors / skips =
+#+Existing office baseline failures versus new failures =
+#+Browser and screen size tested =
+#+
+#+3. STORE SELECTION AND RECOVERY
+#+
+#+New dedicated reporting store, or safe copy of prior reporting store =
+#+Everyone used the same store alias =
+#+Original pricing SQLite was left under its existing owner =
+#+store-init / store-check results =
+#+Store journal mode / create-journal permission check =
+#+store-copy result / source schema accepted / target was new =
+#+Foreign-table copy refusal result / no destination created =
+#+Backup time and whether all reporting writers were stopped =
+#+Restore tested in an isolated app/store =
+#+Snapshot / entry / revision / retry counts before and after =
+#+Reopened saved report day and same source read time =
+#+What restore coverage is still missing =
+#+
+#+4. TWO ACTUAL PCS
+#+
+#+Shared-probe identifier seen on A and B =
+#+A creates probe / B sees it =
+#+A updates expected revision 1 / B still tries revision 1 =
+#+B stale update gives CONFLICT, expected exit 3 =
+#+B refresh sees revision 2 =
+#+Repeated accepted retry returns original result without extra entry =
+#+Same token with different content is rejected =
+#+Restart both processes / same committed state returns =
+#+Real shared-drive wait/lock/error observations =
+#+This test used two actual PCs / only two local processes =
+#+
+#+5. REQUEST POPULATION AND FLOW
+#+
+#+Date/window examined / timezone confirmed =
+#+Actual SLD request ID / creation field / row meaning confirmed =
+#+Request attempts and reprices are counted as =
+#+All created SLD requests preserved before product/state/fee filters =
+#+Exact Excel Manual-profile expression and domain, if permitted to return =
+#+Profile mapping confirmed / provisional / unresolved =
+#+eFlow + voiceflow + unknown reconciles to distinct requests =
+#+Unpriced/unreceived source coverage still unknown =
+#+Chosen request cohort and scan scope =
+#+
+#+6. TRADES AND PROVIDER
+#+
+#+Initial-fixing-day selection confirmed =
+#+Older-created product fixing on the selected day included =
+#+Actual product state/execution rule checked against Activity Monitor =
+#+RFQ -> product link and multiplicity =
+#+Hedge table singular/plural spelling resolved =
+#+Provider is executing winner, including internal hedges =
+#+Actual winner/part/revision selection =
+#+Profile/provider marked confirmed only after comparison =
+#+Missing/ambiguous product/RFQ/provider cases and their visible handling =
+#+Classified requests still usable when trade coverage is incomplete =
+#+
+#+7. SIZE, FX AND PNL
+#+
+#+SLD AMOUNT/notional field and units =
+#+Original currency retained =
+#+Reviewed FX reference format / CHF-per-unit direction =
+#+Latest reviewed rate per currency up to reporting month is available =
+#+Missing FX leaves product visible and affected CHF totals unavailable =
+#+Strict CHF 500,000 boundary cases checked =
+#+Actual annual margin field/expression =
+#+Margin already decimal or percentage points / chosen margin_scale =
+#+Lifetime source and years conversion / day convention =
+#+Native PnL supplied directly, or calculated margin x notional x years =
+#+PA versus TOTAL fees / signs / joins checked =
+#+Independent native and CHF PnL comparison result =
+#+Fields/sections still unavailable and exact reason =
+#+
+#+Fictional example explaining the verified units
+#+  Amount/currency =
+#+  Raw margin and scale =
+#+  Lifetime and unit =
+#+  Expected native PnL =
+#+  Fictional CHF-per-unit factor =
+#+  Expected CHF notional / CHF PnL =
+#+
+#+7A. DESK / ACTIVITY MONITOR VERSUS PILOT PREVIEW
+#+
+#+Keep actual business figures inside the office unless you choose an allowed
+#+return. These rows also belong in the internal WORKLOG. Use the SAME day,
+#+cutoff, source scope and FX basis. Delta = pilot preview minus desk/reference.
+#+If scopes differ, state the difference before calling a delta an error.
+#+
+#+Measure                    Desk / AM     Preview       Delta       Pass / cause
+#+eFlow requests             __________    __________    __________  ____________
+#+Voiceflow requests         __________    __________    __________  ____________
+#+Unknown-flow requests      __________    __________    __________  ____________
+#+All distinct requests      __________    __________    __________  ____________
+#+eFlow trades               __________    __________    __________  ____________
+#+eFlow CHF volume           __________    __________    __________  ____________
+#+eFlow CHF issuance PnL     __________    __________    __________  ____________
+#+eFlow >CHF500k detail rows __________    __________    __________  ____________
+#+Voiceflow trade headline   __________    __________    __________  ____________
+#+Ordinary voice detail rows __________    __________    __________  ____________
+#+Subscription issuance rows __________    __________    __________  ____________
+#+Subscription wins         __________    __________    __________  ____________
+#+Pre-hedge rows             __________    __________    __________  ____________
+#+Unresolved trade groups    __________    __________    __________  ____________
+#+Missing CHF / PnL rows     __________    __________    __________  ____________
+#+
+#+For a linked subscription, the voice headline includes the SLD trade once;
+#+its detail moves into the subscription issuance list. A win and pre-hedge
+#+contribute no additional trade. Pending or possible-duplicate entries need
+#+their status beside the figures. Unavailable totals should say unavailable.
+#+
+#+ONE WORKED MISMATCH
+#+Internal case alias / selected day =
+#+Measure or detail field =
+#+Desk / AM expected result =
+#+Pilot result =
+#+Delta =
+#+Source role / field / join / event date examined =
+#+Expected row grain and actual multiplicity =
+#+Filter or eligibility difference =
+#+Raw unit -> agreed conversion -> expected value =
+#+FX month/factor direction or PnL annualisation difference =
+#+Cause confirmed or hypothesis =
+#+Smallest config/code correction made internally =
+#+Exact preview/test rerun =
+#+New desk / preview / delta =
+#+Accepted / still provisional / blocked field =
+#+Fictional version explaining the issue for return home =
+#+
+#+8. MANUAL EVENTS AND DEDUPLICATION
+#+
+#+Win on commitment day, including no final size =
+#+Win adds one win and no trade =
+#+Pre-hedge remains outside main volume/PnL =
+#+Pending unlinked issuance remains visible but uncounted =
+#+Explicit missing-SLD confirmation counts one issuance =
+#+Linked existing SLD issuance counts once in voiceflow =
+#+Linked issuance detail appears only in subscription issuance list =
+#+Later SLD arrival linked to existing entry without double-counting =
+#+Possible duplicate warning/provisional headline observed =
+#+Removing entry from B is visible on A after refresh =
+#+Stale form keeps typed input and requires a fresh selection =
+#+Anonymous editing retained; no new actor/allowlist requirement added =
+#+
+#+9. TODAY, HISTORY AND THE FIRST CAPTURE
+# COPY BLOCK 27
+#+
+#+Today opens and refreshes after 60 seconds / by button =
+#+Draft survives a refresh =
+#+Failed Today read retains same-day last-good data with failure status =
+#+Different day does not inherit another day's values =
+#+Thursday preview reconciled / gaps recorded =
+#+Thursday first read on Friday labelled reconstructed =
+#+Friday capture time / operator alias / coverage through =
+#+Saved source snapshot survives restart =
+#+Later manual add/remove changes past-day view, with saved SLD unchanged =
+#+Same-day recapture preserves first source snapshot =
+#+Monday previous-business-day selection and desk holidays checked =
+#+Actual 07:30 availability / manual operating plan =
+#+Unattended host/scheduler remains pending / already established =
+#+
+#+10. OTHER REQUESTED APP CHANGES
+#+
+#+Two exact Platform A Conditional Coupon mappings present once each =
+#+Common families and Barrier flags correct =
+#+Prepared monthly run still contains its original mapped values =
+#+Reason excluded from bar results and matching RFQs =
+#+An RFQ with two Reasons is removed from both selected contributions =
+#+Overall population comparison remains fixed =
+#+Excluded Reason can still be restored through the menu =
+#+Existing monthly navigation/filter/PDF smoke result =
+#+
+#+11. RELEASE DECISION AND PRIORITIES
+#+
+#+Accepted for pilot / restricted to named tested sections / withdrawn =
+#+Sections internally reconciled =
+#+Sections working only with fictional inputs =
+#+Unverified/provisional sections still visible as such =
+#+First failure stage and how reproduced =
+#+Cause confirmed or still a hypothesis =
+#+Fix applied / exact test rerun / result =
+#+Fallback original app/run still available =
+#+Any manual entries written after backup and how preserved =
+#+Risk / observed trigger / affected result / next check / owner alias =
+#+  Source or financial definition =
+#+  Shared writes or recovery =
+#+  Startup, capture or timing =
+#+Three highest-priority weekend changes =
+#+  1.
+#+  2.
+#+  3.
+#+Smallest fact still needed internally =
+#+
+#+COPYABLE INTERNAL GPT-5.1 WRAP-UP
+#+
+#+Help me finish our Friday WORKLOG and this return sheet. Separate installation,
